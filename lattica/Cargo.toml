@@ -1,0 +1,41 @@
+[package]
+name = "lattica"
+version = "1.0.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.46.1", features = ["full"] }
+libp2p = { version = "0.54.0", features = ["full"] }
+futures = "0.3.31"
+tracing = "0.1.41"
+anyhow = "1.0.98"
+fnv = "1.0.7"
+bincode = "2.0.1"
+async-trait = "0.1.88"
+serde = { version = "1.0.219", features = ["derive", "rc"]}
+sled = "0.34.7"
+libp2p-stream = {version = "0.2.0-alpha"}
+uuid = { version = "1.17.0", features = ["v4"] }
+tokio-stream = "0.1.17"
+rand = "0.8.5"
+chrono = "0.4.41"
+beetswap = "0.4.1"
+blockstore = {version = "0.7.1", features = ["sled"]}
+cid = "0.11.1"
+multihash-codetable = {version = "0.1.4", features = ["sha2"]}
+async-compression = {version = "0.4.30", features = ["all"]}
+clap = { version = "4.5.41", features = ["derive"] }
+serde_json = "1.0.143"
+
+[[example]]
+name = "bitswap"
+[[example]]
+name = "dcutr"
+[[example]]
+name = "dht"
+[[example]]
+name = "ping"
+[[example]]
+name = "rendezvous_client"
+[[example]]
+name = "rpc"
