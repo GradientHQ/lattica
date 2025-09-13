@@ -57,7 +57,7 @@ impl LatticaBehaviour{
         ));
 
         let kad = if config.with_kad {
-            let mut store = MultiStore::new(peer_id, config.storage_path.clone()).unwrap();
+            let mut store = MultiStore::new(peer_id, config.dht_db_path.clone()).unwrap();
             store.warm_up().unwrap();
 
             let mut kad_cfg = kad::Config::default();

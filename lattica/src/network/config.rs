@@ -24,14 +24,18 @@ pub struct Config {
     pub storage_path: String,
     pub compression_algorithm: CompressionAlgorithm,
     pub compression_level: CompressionLevel,
+    pub dht_db_path: String
 }
 
 impl Default for Config {
     fn default() -> Self {
         let key = Keypair::generate_ed25519();
 
-        let mut db_path = temp_dir();
-        db_path.push(format!("db_{}", key.public().to_peer_id()));
+        let mut storage_path = temp_dir();
+        storage_path.push(format!("db_{}", key.public().to_peer_id()));
+
+        let mut dht_db_path = temp_dir();
+        dht_db_path.push(format!("dht_{}", key.public().to_peer_id()));
         
         Self {
             listen_addrs: vec!["/ip4/0.0.0.0/tcp/0".parse().unwrap(),"/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap()],
@@ -49,9 +53,10 @@ impl Default for Config {
             with_dcutr: false,
             with_relay: false,
             relay_servers: vec![],
-            storage_path: db_path.to_str().unwrap().to_string(),
+            storage_path: storage_path.to_str().unwrap().to_string(),
             compression_algorithm: CompressionAlgorithm::None,
-            compression_level: CompressionLevel::Default
+            compression_level: CompressionLevel::Default,
+            dht_db_path: dht_db_path.to_str().unwrap().to_string(),
         }
     }
 }

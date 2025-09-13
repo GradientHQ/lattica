@@ -144,6 +144,7 @@ lattica = Lattica.builder() \
 - `with_dcutr(enabled)`: Enable/disable TCP/QUIC NAT travelsal[need relay servers]
 - `with_external_addrs(addrs)`: Set external address
 - `with_storage_path`: Persistent storage path
+- `with_dht_db_path`: DHT Persistent db path
 
 ## Development
 

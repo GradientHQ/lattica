@@ -214,6 +214,10 @@ impl LatticaSDK {
             .and_then(|dict| dict.get_item("storage_path").ok())
             .and_then(|item| item.extract::<String>().ok());
 
+        let dht_db_path = config_dict
+            .and_then(|dict| dict.get_item("dht_db_path").ok())
+            .and_then(|item| item.extract::<String>().ok());
+
         let runtime = Arc::new(Runtime::new()?);
         let lattica = runtime.block_on(async move {
             network::Lattica::builder()
@@ -226,6 +230,7 @@ impl LatticaSDK {
                 .with_listen_addrs(listen_addrs)
                 .with_external_addrs(external_addrs)
                 .with_storage_path(storage_path)
+                .with_dht_db_path(dht_db_path)
                 .build().await.map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to create Lattica: {:?}", e)))
         })?;
 

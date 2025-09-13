@@ -50,7 +50,7 @@ def main():
     else:
         print("\n=== Running as DHT Server ===")
         print("Waiting for connections... (Press Ctrl+C to stop)")
-        Lattica.builder().build()
+        lattica = Lattica.builder().build()
         try:
             while True:
                 time.sleep(1)

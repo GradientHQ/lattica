@@ -154,6 +154,13 @@ impl LatticaBuilder {
         self
     }
 
+    pub fn with_dht_db_path(mut self, db_path: Option<String>) -> Self {
+        if let Some(db_path) = db_path {
+            self.config.dht_db_path = db_path;
+        }
+        self
+    }
+
     pub fn from_config(config: Config) -> Self {
         Self { config }
     }
