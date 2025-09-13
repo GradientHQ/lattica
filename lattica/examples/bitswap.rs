@@ -1,48 +1,61 @@
-use lattica::{network, common, rpc};
-use std::time::{Duration, Instant};
-use libp2p::gossipsub::PublishError::Duplicate;
-use libp2p::kad::{Quorum, Record, RecordKey};
+use lattica::{network};
+use libp2p::kad::{RecordKey};
 use tokio::signal;
-use tokio::time::sleep_until;
 use std::env;
 use std::error::Error;
-use futures::StreamExt;
-use libp2p::Multiaddr;
-use anyhow::Result;
 use blockstore::block::Block;
+use cid::Cid;
+use libp2p::Multiaddr;
 use lattica::common::BytesBlock;
 
 // node1: cargo run --example bitswap
-// node2: cargo run --example bitswap /ip4/127.0.0.1/tcp/x/p2p/xxxxxxxx
+// node2: cargo run --example bitswap /ip4/127.0.0.1/tcp/x/p2p/xxxxxxxx  xxxxxx(cid)
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn Error>> {
+    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
+
     let args: Vec<String> = env::args().collect();
-    let bootstrap_nodes = if args.len() > 1 {
-        args[1..].into_iter().filter_map(|addr| {
-            match addr.parse::<Multiaddr>() {
-                Ok(addr) => Some(addr),
-                Err(e) => {
-                    tracing::warn!("Invalid bootstrap address '{}': {}", addr, e);
-                    None
-                }
+    let bootstrap_nodes: Vec<Multiaddr> = if args.len() > 1 {
+        match args[1].parse::<Multiaddr>() {
+            Ok(addr) => vec![addr],
+            Err(e) => {
+                eprintln!("Invalid bootstrap address '{}': {}", args[1], e);
+                vec![]
             }
-        }).collect()
+        }
     } else {
         vec![]
     };
 
+    let cid_arg = if args.len() > 2 {
+        args[2].clone()
+    } else {
+        "".to_string()
+    };
 
     let mut lattica = network::Lattica::builder()
         .with_bootstrap_nodes(bootstrap_nodes.clone())
         .build().await?;
 
-    let cid = lattica.put_block(&BytesBlock("hello".as_bytes().to_vec())).await?;
-    println!("put block {:?}", cid);
-    let block = lattica.get_block(&cid).await?;
-    println!("get block {:?}", String::from_utf8(block.data().to_vec())?);
-    let result = lattica.remove_block(&cid).await;
-    if result.is_err() {
-        println!("remove block error: {:?}", cid);
+    if bootstrap_nodes.len() > 0 {
+        // get providers
+        let record = RecordKey::new(&cid_arg);
+        let peers = lattica.get_providers(record).await?;
+
+        // get block
+        let cid = Cid::try_from(cid_arg)?;
+        let data_block = lattica.get_block(&cid).await?;
+        let data = data_block.data();
+        tracing::info!("get block,data: {:?}", str::from_utf8(&data)?);
+
+    } else {
+        // put block
+        let cid = lattica.put_block(&BytesBlock("hello".as_bytes().to_vec())).await?;
+        tracing::info!("put record cid: {:?}", cid);
+
+        // start providing
+        let record = RecordKey::new(&cid.to_string().as_str());
+        lattica.start_providing(record).await?;
     }
 
     signal::ctrl_c().await.expect("failed to listen for event");

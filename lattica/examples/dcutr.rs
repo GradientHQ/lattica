@@ -44,6 +44,7 @@ impl FromStr for Mode {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
     let opts = Opts::parse();
 
     let listen_addr_tcp = Multiaddr::empty()

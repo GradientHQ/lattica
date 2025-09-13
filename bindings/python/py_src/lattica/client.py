@@ -144,7 +144,7 @@ class Lattica:
                 serialized_value, expiration = result
                 value = pickle.loads(serialized_value)
                 return ValueWithExpiration(value=value, expiration_time=expiration)
-                
+
         except Exception as e:
             print(f"Error getting value: {e}")
             return None
@@ -196,6 +196,42 @@ class Lattica:
             return self._lattica_instance.get_peer_rtt(peer_id)
         except Exception as e:
             raise RuntimeError(f"Failed to get peer RTT: {e}")
+
+    def put_block(self, data: bytes) -> str:
+        try:
+            return self._lattica_instance.put_block(data)
+        except Exception as e:
+            raise RuntimeError(f"Failed to put block: {e}")
+
+    def get_block(self, cid: str) -> bytes:
+        try:
+            return self._lattica_instance.get_block(cid)
+        except Exception as e:
+            raise RuntimeError(f"Failed to get block: {e}")
+
+    def remove_block(self, cid: str):
+        try:
+            return self._lattica_instance.remove_block(cid)
+        except Exception as e:
+            raise RuntimeError(f"Failed to remove block: {e}")
+
+    def start_providing(self, key: str):
+        try:
+            return self._lattica_instance.start_providing(key)
+        except Exception as e:
+            raise RuntimeError(f"Failed to start providing: {e}")
+
+    def get_providers(self, key: str) -> List[str]:
+        try:
+            return self._lattica_instance.get_providers(key)
+        except Exception as e:
+            raise RuntimeError(f"Failed to get providers: {e}")
+
+    def stop_providing(self, key: str):
+        try:
+            return self._lattica_instance.stop_providing(key)
+        except Exception as e:
+            raise RuntimeError(f"Failed to stop providing: {e}")
 
     def __enter__(self):
         self._ensure_initialized()

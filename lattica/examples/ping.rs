@@ -23,6 +23,8 @@ async fn print_node_info(node_name: &str, node: &Lattica) {
 // cargo run --example ping -- /ip4/127.0.0.1/tcp/x/p2p/x
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
+
     let args: Vec<String> = env::args().collect();
     let mut server_peer_id = PeerId::random();
     let mut bootstrap_nodes = vec![];

@@ -12,6 +12,8 @@ const RENDEZVOUS_NAMESPACE: &str = "network-demo";
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
+
     // The well-known rendezvous server PeerID (from the server example)
     let rendezvous_peer_id: PeerId = "xx".parse().map_err(|e| anyhow!("Failed to parse peer ID: {}", e))?;
     let rendezvous_addr: libp2p::Multiaddr = "/ip4/127.0.0.1/tcp/x".parse().map_err(|e| anyhow!("Failed to parse rendezvous address: {}", e))?;

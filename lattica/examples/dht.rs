@@ -9,6 +9,8 @@ use libp2p::Multiaddr;
 // node2: cargo run --example dht /ip4/127.0.0.1/tcp/x/p2p/xxxxxxxx
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
+    
     let args: Vec<String> = env::args().collect();
     let bootstrap_nodes = if args.len() > 1 {
         args[1..].into_iter().filter_map(|addr| {

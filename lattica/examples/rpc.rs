@@ -132,6 +132,8 @@ impl rpc::RpcService for ExampleService {
 // node2: cargo run --example rpc /ip4/127.0.0.1/tcp/x/p2p/xxxxxxxx(bootstraps) xxxxxxxx(server peerID)
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
+
     let args: Vec<String> = env::args().collect();
     let mut bootstrap_nodes = vec![];
     let mut server_peer_id = String::new();

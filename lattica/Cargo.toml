@@ -26,6 +26,7 @@ multihash-codetable = {version = "0.1.4", features = ["sha2"]}
 async-compression = {version = "0.4.30", features = ["all"]}
 clap = { version = "4.5.41", features = ["derive"] }
 serde_json = "1.0.143"
+tracing-subscriber = "0.3.20"
 
 [[example]]
 name = "bitswap"
