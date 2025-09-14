@@ -2,11 +2,11 @@ use super::{*};
 use crate::{common, rpc};
 use std::{sync::Arc};
 use anyhow::{Result, anyhow};
-use libp2p::{Swarm, SwarmBuilder, identify,
-             kad::{RecordKey, Event, ProgressStep, BootstrapOk, GetRecordOk,
-             Mode, PeerRecord, PutRecordOk, QueryResult, Quorum, Record}, Multiaddr, multiaddr::{Protocol},
-             PeerId, futures::{future}, request_response::{OutboundRequestId, ResponseChannel}, Stream, request_response,
-             rendezvous, mdns, upnp, relay, gossipsub, dcutr};
+use libp2p::{Swarm, identify,
+             kad::{Event, BootstrapOk, GetRecordOk,
+             PeerRecord, PutRecordOk, QueryResult}, Multiaddr, multiaddr::{Protocol},
+             PeerId, request_response::{OutboundRequestId, ResponseChannel}, Stream, request_response,
+             rendezvous, mdns, upnp, relay, gossipsub};
 use futures::{AsyncReadExt, AsyncWriteExt};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -81,7 +81,7 @@ pub(crate) async fn handle_incoming_stream(mut stream: Stream, services: Arc<RwL
                 };
 
                 match service.handle_stream(method_name, complete_request).await {
-                    Ok(mut stream_response) => {
+                    Ok(stream_response) => {
                         let chunk_size = 16 * 1024 * 1024; // 16M
                         let total_chunks = (stream_response.data.len() + chunk_size - 1) / chunk_size;
 

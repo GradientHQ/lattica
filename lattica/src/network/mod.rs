@@ -8,7 +8,7 @@ pub mod store;
 
 pub use config::*;
 pub use behaviour::*;
-pub use handle::*;
+pub(crate) use handle::*;
 pub use core::*;
 pub use peer_info::*;
 pub use peers::*;

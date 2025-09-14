@@ -38,7 +38,10 @@ impl Default for Config {
         dht_db_path.push(format!("dht_{}", key.public().to_peer_id()));
         
         Self {
-            listen_addrs: vec!["/ip4/0.0.0.0/tcp/0".parse().unwrap(),"/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap()],
+            listen_addrs: vec![
+                "/ip4/0.0.0.0/tcp/0".parse().unwrap(),
+                "/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap(),
+                "/ip4/0.0.0.0/tcp/0/ws".parse().unwrap()],
             keypair: key,
             protocol_version: "/lattica/1.0.0".to_string(),
             idle_timeout: Duration::from_secs(60),

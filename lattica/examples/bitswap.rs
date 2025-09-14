@@ -11,7 +11,7 @@ use lattica::common::BytesBlock;
 // node1: cargo run --example bitswap
 // node2: cargo run --example bitswap /ip4/127.0.0.1/tcp/x/p2p/xxxxxxxx  xxxxxx(cid)
 #[tokio::main]
-async fn main() -> std::result::Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
 
     let args: Vec<String> = env::args().collect();
@@ -33,7 +33,7 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
         "".to_string()
     };
 
-    let mut lattica = network::Lattica::builder()
+    let lattica = network::Lattica::builder()
         .with_bootstrap_nodes(bootstrap_nodes.clone())
         .build().await?;
 
@@ -41,6 +41,7 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
         // get providers
         let record = RecordKey::new(&cid_arg);
         let peers = lattica.get_providers(record).await?;
+        tracing::info!("get providers, peers: {:?}", peers);
 
         // get block
         let cid = Cid::try_from(cid_arg)?;

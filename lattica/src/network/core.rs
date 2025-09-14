@@ -179,6 +179,7 @@ impl LatticaBuilder {
             )?
             .with_quic()
             .with_dns()?
+            .with_websocket(noise::Config::new, yamux::Config::default).await?
             .with_relay_client(noise::Config::new, yamux::Config::default)?
             .with_behaviour(|_keypair, relay_behaviour| {
                 let relay_client = if self.config.with_relay {
