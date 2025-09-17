@@ -338,8 +338,8 @@ class FutureWrapper:
         self.expected_return_type = expected_return_type
         self.is_stream = is_stream
 
-    def result(self):
-        raw_result = self.future.result()
+    def result(self, timeout=180):
+        raw_result = self.future.result(timeout=timeout)
         return self._process_result(raw_result)
 
     def __await__(self):

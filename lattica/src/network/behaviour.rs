@@ -130,7 +130,7 @@ impl LatticaBehaviour{
                 config.protocol_version.clone(),
                 config.keypair.public(),
             )),
-            request_response: request_response::Behaviour::new(protocols, request_response::Config::default()),
+            request_response: request_response::Behaviour::new(protocols, request_response::Config::default().with_request_timeout(Duration::from_secs(3*60))),
             stream: stream::Behaviour::new(),
             rendezvous,
             mdns,

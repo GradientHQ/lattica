@@ -115,7 +115,7 @@ async def run_client():
         request = MockProtoRequest(data=bytearray(1024 * 1024 * 1024))
         start_time = time.time()
         future = stub.stream_rpc(request)
-        result = future.result()
+        result = future.result(timeout=10)
         transfer_time = time.time() - start_time
         print(f"result: {result.message}")
         print(f"Total transfer time: {transfer_time:.2f}s")

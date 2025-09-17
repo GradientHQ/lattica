@@ -78,7 +78,7 @@ impl From<&network::peer_info::PeerInfo> for PeerInfo {
 
 #[pymethods]
 impl LFuture {
-    pub fn result(&self) -> PyResult<Vec<u8>> {
+    pub fn result(&self, timeout: u64) -> PyResult<Vec<u8>> {
         let handle_opt = self.runtime.block_on(async {
             self.handle.lock().await.take()
         });
@@ -86,7 +86,7 @@ impl LFuture {
         Python::with_gil(|py| {
             py.allow_threads(|| {
                 if let Some(handle) = handle_opt {
-                    let join_ret = self.runtime.block_on(async { tokio::time::timeout(Duration::from_secs(3*60), handle).await});
+                    let join_ret = self.runtime.block_on(async { tokio::time::timeout(Duration::from_secs(timeout), handle).await});
 
                     let handle_ret = match join_ret {
                         Ok(ret) => ret,
