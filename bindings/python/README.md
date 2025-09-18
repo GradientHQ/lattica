@@ -145,6 +145,7 @@ lattica = Lattica.builder() \
 - `with_external_addrs(addrs)`: Set external address
 - `with_storage_path`: Persistent storage path
 - `with_dht_db_path`: DHT Persistent db path
+- `with_key_path`: Set Keypair path
 
 ## Development
 

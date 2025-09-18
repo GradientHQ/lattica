@@ -85,6 +85,10 @@ class Lattica:
         self.config['dht_db_path'] = db_path
         return self
 
+    def with_key_path(self, key_path: str) -> 'Lattica':
+        self.config['key_path'] = key_path
+        return self
+
     def build(self) -> 'Lattica':
         self._initialize_client()
         return self

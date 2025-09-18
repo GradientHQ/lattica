@@ -24,7 +24,8 @@ pub struct Config {
     pub storage_path: String,
     pub compression_algorithm: CompressionAlgorithm,
     pub compression_level: CompressionLevel,
-    pub dht_db_path: String
+    pub dht_db_path: String,
+    pub key_path: String,
 }
 
 impl Default for Config {
@@ -32,10 +33,10 @@ impl Default for Config {
         let key = Keypair::generate_ed25519();
 
         let mut storage_path = temp_dir();
-        storage_path.push(format!("db_{}", key.public().to_peer_id()));
+        storage_path.push("p2p_storage");
 
         let mut dht_db_path = temp_dir();
-        dht_db_path.push(format!("dht_{}", key.public().to_peer_id()));
+        dht_db_path.push("p2p_dht");
         
         Self {
             listen_addrs: vec![
@@ -60,6 +61,7 @@ impl Default for Config {
             compression_algorithm: CompressionAlgorithm::None,
             compression_level: CompressionLevel::Default,
             dht_db_path: dht_db_path.to_str().unwrap().to_string(),
+            key_path: temp_dir().to_str().unwrap().to_string(),
         }
     }
 }

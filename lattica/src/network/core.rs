@@ -1,7 +1,7 @@
 use crate::common;
 use crate::rpc;
 use super::{*};
-use std::{sync::Arc, error::Error};
+use std::{sync::Arc, error::Error, fs};
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use libp2p::{noise, tcp, yamux, Swarm, SwarmBuilder, identity,swarm::{SwarmEvent},
@@ -10,6 +10,7 @@ use libp2p::{noise, tcp, yamux, Swarm, SwarmBuilder, identity,swarm::{SwarmEvent
 use futures::{AsyncReadExt, AsyncWriteExt};
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::path::Path;
 use bincode::config::standard;
 use futures::future::Either;
 use tokio::task::JoinHandle;
@@ -97,8 +98,10 @@ impl LatticaBuilder {
         self
     }
 
-    pub fn with_keypair(mut self, keypair: identity::Keypair) -> Self {
-        self.config.keypair = keypair;
+    pub fn with_key_path(mut self, key_path: Option<String>) -> Self {
+        if let Some(key_path) = key_path {
+            self.config.key_path = key_path;
+        }
         self
     }
 
@@ -166,6 +169,34 @@ impl LatticaBuilder {
     }
 
     pub async fn build(mut self) -> Result<Lattica, Box<dyn Error>> {
+        // load keypair
+        let keypair_path = format!("{}/p2p.key", self.config.key_path.clone());
+        if Path::new(&keypair_path).exists() {
+            match fs::read(&keypair_path) {
+                Ok(keypair_bytes) => {
+                    match identity::Keypair::from_protobuf_encoding(&keypair_bytes) {
+                        Ok(keypair) => {
+                            self.config.keypair = keypair;
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            match self.config.keypair.to_protobuf_encoding() {
+                Ok(keypair_bytes) => {
+                    if let Some(parent) = Path::new(&keypair_path).parent() {
+                        if !parent.exists() {
+                            let _ = fs::create_dir_all(parent);
+                        }
+                    }
+                    fs::write(&keypair_path, keypair_bytes)?;
+                }
+                _ => {}
+            }
+        }
+
         let db = sled::open(self.config.clone().storage_path)?;
         let storage = SledBlockstore::new(db).await?;
         let storage_arc = Arc::new(storage);
