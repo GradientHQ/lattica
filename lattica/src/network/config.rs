@@ -3,6 +3,7 @@ use std::time::Duration;
 use libp2p::identity::Keypair;
 use libp2p::{Multiaddr, PeerId};
 use crate::common::{CompressionAlgorithm, CompressionLevel};
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct Config {
@@ -33,10 +34,13 @@ impl Default for Config {
         let key = Keypair::generate_ed25519();
 
         let mut storage_path = temp_dir();
-        storage_path.push("p2p_storage");
+        storage_path.push(format!("{}.storage", Uuid::new_v4().to_string()));
 
         let mut dht_db_path = temp_dir();
-        dht_db_path.push("p2p_dht");
+        dht_db_path.push(format!("{}.dht", Uuid::new_v4().to_string()));
+
+        let mut key_path = temp_dir();
+        key_path.push(format!("{}.key", Uuid::new_v4().to_string()));
         
         Self {
             listen_addrs: vec![
@@ -61,7 +65,7 @@ impl Default for Config {
             compression_algorithm: CompressionAlgorithm::None,
             compression_level: CompressionLevel::Default,
             dht_db_path: dht_db_path.to_str().unwrap().to_string(),
-            key_path: temp_dir().to_str().unwrap().to_string(),
+            key_path: key_path.to_str().unwrap().to_string(),
         }
     }
 }

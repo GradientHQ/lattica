@@ -61,7 +61,7 @@ class RPCHandler(ConnectionHandler):
         )
 
 async def run_server():
-    lattica_inst = Lattica.builder().build()
+    lattica_inst = Lattica.builder().with_key_path("/tmp").build()
     RPCHandler(lattica_inst)
 
     try:
