@@ -148,6 +148,11 @@ match lattica.call(peer_id, "ExampleService.echo".to_string(), request_data).awa
 }
 ```
 
+### Common Tools
+We provide a project called **lattica-tools**, which includes startup programs for common components such as **relay** and **rendezvous**.  
+You can find it at [https://github.com/GradientHQ/lattica-tools](https://github.com/GradientHQ/lattica-tools).
+
+
 ## Supported Scenes
 
 ##### Multi-protocol DCUTR NAT Traversal

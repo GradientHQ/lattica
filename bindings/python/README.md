@@ -12,7 +12,11 @@ A unified Python SDK for P2P networking with integrated DHT and NAT capabilities
 - **High Performance**: Built with Rust for optimal performance
 
 ## Installation
-You can install from source using:
+You can install the released versions
+```bash
+pip install lattica
+```
+Or you can install from source using:
 ```bash
 pip install git+https://github.com/GradientHQ/lattica.git#subdirectory=bindings/python
 ```
