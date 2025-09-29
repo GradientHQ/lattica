@@ -35,8 +35,18 @@ jobs:
           cd bindings/python
           maturin build --release --strip
 
-      - name: Build wheel on Linux/Windows
-        if: runner.os != 'macOS'
+      - name: Build wheel on Linux
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          cd bindings/python
+          maturin build --release
+
+      - name: Build wheel on Windows
+        if: startsWith(matrix.os, 'windows')
+        env:
+          CARGO_BUILD_JOBS: "1"
+          CARGO_INCREMENTAL: "0"
+          RUSTFLAGS: "-C debuginfo=1 -C codegen-units=1 -C link-arg=/DEBUG:FULL -C link-arg=/INCREMENTAL:NO"
         run: |
           cd bindings/python
           maturin build --release
