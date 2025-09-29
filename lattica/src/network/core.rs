@@ -164,6 +164,13 @@ impl LatticaBuilder {
         self
     }
 
+    pub fn with_protocol_version(mut self, protocol: Option<String>) -> Self {
+        if let Some(protocol) = protocol {
+            self.config.protocol_version = protocol;
+        }
+        self
+    }
+
     pub fn from_config(config: Config) -> Self {
         Self { config }
     }
@@ -195,6 +202,10 @@ impl LatticaBuilder {
                 }
                 _ => {}
             }
+        }
+
+        if self.config.protocol_version == "".to_string() {
+            self.config.protocol_version = format!("/{}", self.config.keypair.public().to_peer_id().to_string());
         }
 
         let db = sled::open(self.config.clone().storage_path)?;

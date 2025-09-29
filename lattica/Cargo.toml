@@ -40,3 +40,6 @@ name = "ping"
 name = "rendezvous_client"
 [[example]]
 name = "rpc"
+
+[profile.release]
+debug = false

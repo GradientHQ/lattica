@@ -451,7 +451,18 @@ pub(crate) async fn handle_identity_event(
 ) {
     match event {
         identify::Event::Received {peer_id, info, ..} => {
-            if !common::is_relay_server(&config.relay_servers, peer_id) {
+            if !common::is_relay_server(&config.relay_servers, peer_id) && !common::is_relay_server(&config.bootstrap_nodes, peer_id) {
+                if config.protocol_version != info.protocol_version {
+                    match swarm.disconnect_peer_id(peer_id) {
+                        Ok(()) => {
+                            tracing::info!("protocol version mismatch, disconnect from peer {}", peer_id);
+                        },
+                        Err(()) => {
+                        }
+                    }
+                    return;
+                }
+                
                 address_book.set_info(&peer_id, info.clone());
                 
                 for addr in info.listen_addrs {

@@ -2,11 +2,11 @@ use libp2p::Multiaddr;
 use libp2p::multiaddr::Protocol;
 use libp2p::multiaddr::PeerId;
 
-pub fn get_transport_protocol(addr: &Multiaddr) -> Option<Protocol> {
+pub fn get_transport_protocol(addr: &Multiaddr) -> Option<Protocol<'_>>  {
     addr.iter().nth(1)
 }
 
-pub fn extract_peer_id(addr: &Multiaddr) -> Option<PeerId> {
+pub fn extract_peer_id(addr: Multiaddr) -> Option<PeerId> {
     for protocol in addr.iter() {
         if let Protocol::P2p(peer_id) = protocol {
             return Some(peer_id);

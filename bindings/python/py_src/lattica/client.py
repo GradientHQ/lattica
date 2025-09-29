@@ -89,6 +89,10 @@ class Lattica:
         self.config['key_path'] = key_path
         return self
 
+    def with_protocol(self, protocol: str) -> 'Lattica':
+        self.config['protocol'] = protocol
+        return self
+
     def build(self) -> 'Lattica':
         self._initialize_client()
         return self
