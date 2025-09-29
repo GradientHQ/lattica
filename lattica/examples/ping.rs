@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
         let addr = args[1].parse::<Multiaddr>()?;
         bootstrap_nodes.push(addr.clone());
 
-        if let Some(peer_id) = extract_peer_id(&addr) {
+        if let Some(peer_id) = extract_peer_id(addr) {
             server_peer_id = peer_id;
         }
     }

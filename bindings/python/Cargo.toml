@@ -20,3 +20,6 @@ cid = "0.11.1"
 
 [dependencies.lattica]
 path = "../../lattica"
+
+[profile.release]
+debug = false

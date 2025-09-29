@@ -141,8 +141,7 @@ impl MultiStore {
         persistent_store: &Arc<RwLock<Db>>,
     ) ->Result<()> {
         let now_ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .duration_since(UNIX_EPOCH)?
             .as_nanos() as u64;
 
         let now = Instant::now();
@@ -198,6 +197,10 @@ impl Drop for MultiStore {
 }
 
 impl RecordStore for MultiStore {
+    type RecordsIter<'a> = RecordsIterator<'a>;
+
+    type ProvidedIter<'a> = Box<dyn Iterator<Item = Cow<'a, ProviderRecord>> + 'a>;
+
     fn get(&self, k: &RecordKey) -> Option<Cow<'_, Record>> {
         if let Ok(mut memory_store) = self.memory_store.write() {
             if let Some(record ) = memory_store.get(k) {
@@ -219,7 +222,7 @@ impl RecordStore for MultiStore {
                 let record: Record = stored.into();
                 // check expired
                 if self.is_expired(&record) {
-                    if let Ok(mut db) = self.persistent_store.write() {
+                    if let Ok(db) = self.persistent_store.write() {
                         let _ = db.remove(k);
                     }
 
@@ -266,30 +269,6 @@ impl RecordStore for MultiStore {
         }
     }
 
-    fn add_provider(&mut self, record: ProviderRecord) -> Result<(), Error> {
-        if let Ok(mut memory_store) = self.memory_store.write() {
-            memory_store.add_provider(record);
-        }
-
-        Ok(())
-    }
-
-    fn provided(&self) -> Self::ProvidedIter<'_> {
-        if let Ok(memory_store) = self.memory_store.read() {
-            let vec: Vec<ProviderRecord> = memory_store.provided().map(|c| c.into_owned()).collect();
-            Box::new(vec.into_iter().map(Cow::Owned))
-        } else {
-            Box::new(std::iter::empty())
-        }
-    }
-
-    fn providers(&self, key: &RecordKey) -> Vec<ProviderRecord> {
-        if let Ok(memory_store) = self.memory_store.read() {
-            return memory_store.providers(key);
-        }
-        vec![]
-    }
-
     fn records(&self) -> Self::RecordsIter<'_> {
         let memory_iter = if let Ok(memory_store) = self.memory_store.read() {
             let records: Vec<Cow<'static, Record>> = memory_store.records()
@@ -316,14 +295,34 @@ impl RecordStore for MultiStore {
         }
     }
 
+    fn add_provider(&mut self, record: ProviderRecord) -> Result<(), Error> {
+        if let Ok(mut memory_store) = self.memory_store.write() {
+            memory_store.add_provider(record);
+        }
+
+        Ok(())
+    }
+
+    fn providers(&self, key: &RecordKey) -> Vec<ProviderRecord> {
+        if let Ok(memory_store) = self.memory_store.read() {
+            return memory_store.providers(key);
+        }
+        vec![]
+    }
+
+    fn provided(&self) -> Self::ProvidedIter<'_> {
+        if let Ok(memory_store) = self.memory_store.read() {
+            let vec: Vec<ProviderRecord> = memory_store.provided().map(|c| c.into_owned()).collect();
+            Box::new(vec.into_iter().map(Cow::Owned))
+        } else {
+            Box::new(std::iter::empty())
+        }
+    }
     fn remove_provider(&mut self, k: &RecordKey, p: &PeerId) {
         if let Ok(mut memory_store) = self.memory_store.write() {
             memory_store.remove_provider(k, p);
         }
     }
-
-    type RecordsIter<'a> = RecordsIterator<'a>;
-    type ProvidedIter<'a> = Box<dyn Iterator<Item = Cow<'a, ProviderRecord>> + 'a>;
 }
 
 pub struct RecordsIterator<'a> {

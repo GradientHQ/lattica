@@ -3,9 +3,7 @@ use std::time::Duration;
 use super::{*};
 use crate::rpc;
 use tokio::sync::{oneshot};
-use libp2p::{autonat, dcutr, gossipsub, identify, kad, mdns, ping, relay, rendezvous, upnp, swarm::{NetworkBehaviour,behaviour::toggle::Toggle},
-             kad::{Quorum, Record, PeerRecord, RecordKey, K_VALUE}, request_response, PeerId,
-             gossipsub::{MessageAuthenticity}};
+use libp2p::{autonat, dcutr, gossipsub, identify, kad, mdns, ping, relay, rendezvous, upnp, swarm::{NetworkBehaviour, behaviour::toggle::Toggle}, kad::{Quorum, Record, PeerRecord, RecordKey, K_VALUE}, request_response, PeerId, gossipsub::{MessageAuthenticity}, StreamProtocol};
 use anyhow::{anyhow, Result};
 use blockstore::{SledBlockstore};
 use fnv::{FnvHashMap};
@@ -28,8 +26,6 @@ pub enum QueryChannel {
     GetProviders(oneshot::Sender<Result<Vec<PeerId>>>),
 }
 
-const MAX_MULTIHASH_LENGHT: usize = 64;
-const RAW_CODEC: u64 = 0x55;
 #[derive(NetworkBehaviour)]
 pub struct LatticaBehaviour{
     pub kad: Toggle<kad::Behaviour<MultiStore>>,
@@ -50,6 +46,7 @@ pub struct LatticaBehaviour{
 impl LatticaBehaviour{
     pub fn new(config: &mut Config, relay_behavior: Option<relay::client::Behaviour>, storage: Arc<SledBlockstore>) -> Self {
         let peer_id = config.keypair.public().to_peer_id();
+        let proto_version: &'static str = Box::leak(config.protocol_version.clone().into_boxed_str());
 
         let protocols = std::iter::once((
             rpc::RPC_REQUEST_RESPONSE_PROTOCOL,
@@ -60,7 +57,8 @@ impl LatticaBehaviour{
             let mut store = MultiStore::new(peer_id, config.dht_db_path.clone()).unwrap();
             store.warm_up().unwrap();
 
-            let mut kad_cfg = kad::Config::default();
+            let stream_proto = StreamProtocol::new(proto_version);
+            let mut kad_cfg = kad::Config::new(stream_proto);
             kad_cfg.set_query_timeout(Duration::from_secs(1));
             Toggle::from(Some(kad::Behaviour::with_config(peer_id, store, kad_cfg)))
         } else {
@@ -127,7 +125,7 @@ impl LatticaBehaviour{
             kad,
             ping: ping::Behaviour::new(ping::Config::new()),
             identify: identify::Behaviour::new(identify::Config::new(
-                config.protocol_version.clone(),
+                proto_version.to_string(),
                 config.keypair.public(),
             )),
             request_response: request_response::Behaviour::new(protocols, request_response::Config::default().with_request_timeout(Duration::from_secs(3*60))),

@@ -1,0 +1,52 @@
+name: Build and Publish Lattica Wheels
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14, macos-13, windows-latest]
+        python-version: [3.11, 3.12]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build wheel on macOS (native)
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          cd bindings/python
+          maturin build --release --strip
+
+      - name: Build wheel on Linux/Windows
+        if: runner.os != 'macOS'
+        run: |
+          cd bindings/python
+          maturin build --release
+
+      - name: Upload to PyPI
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          pip install twine
+          cd bindings/python
+          twine upload target/wheels/* --skip-existing
