@@ -196,7 +196,6 @@ pub(crate) async fn handle_kad_event(event: Event, queries: &mut FnvHashMap<Quer
                 QueryResult::Bootstrap(Ok(BootstrapOk{..})) => {
                 }
                 QueryResult::Bootstrap(Err(err)) => {
-                    tracing::error!("bootstrap error: {:?}", err);
                 }
                 QueryResult::GetRecord(Ok(GetRecordOk::FoundRecord(PeerRecord { record, .. }))) => {
                     if let Some(QueryChannel::GetRecord(expected_results, mut records, tx)) = queries.remove(&id.into()) {
@@ -453,6 +452,7 @@ pub(crate) async fn handle_identity_event(
         identify::Event::Received {peer_id, info, ..} => {
             if !common::is_relay_server(&config.relay_servers, peer_id) && !common::is_relay_server(&config.bootstrap_nodes, peer_id) {
                 if config.protocol_version != info.protocol_version {
+                    address_book.remove_peer(&peer_id);
                     match swarm.disconnect_peer_id(peer_id) {
                         Ok(()) => {
                             tracing::info!("protocol version mismatch, disconnect from peer {}", peer_id);
