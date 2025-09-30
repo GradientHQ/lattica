@@ -75,4 +75,8 @@ impl AddressBook {
             .map(|info| info.addresses().map(|(addr, _, _, _, _)| addr.clone()).collect())
             .unwrap_or_default()
     }
+
+    pub fn remove_peer(&mut self, peer_id: &PeerId) {
+        self.peers.remove(peer_id);
+    }
 }
