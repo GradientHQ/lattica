@@ -144,7 +144,7 @@ impl LatticaSDK {
     #[new]
     #[pyo3(signature = (config_dict = None))]
     fn new(config_dict: Option<&Bound<PyAny>>) -> PyResult<Self> {
-        tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
+        tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).try_init().ok();
 
         let bootstrap_nodes = config_dict
             .and_then(|dict| dict.get_item("bootstrap_nodes").ok())
