@@ -195,7 +195,7 @@ pub(crate) async fn handle_kad_event(event: Event, queries: &mut FnvHashMap<Quer
             match result {
                 QueryResult::Bootstrap(Ok(BootstrapOk{..})) => {
                 }
-                QueryResult::Bootstrap(Err(err)) => {
+                QueryResult::Bootstrap(Err(_)) => {
                 }
                 QueryResult::GetRecord(Ok(GetRecordOk::FoundRecord(PeerRecord { record, .. }))) => {
                     if let Some(QueryChannel::GetRecord(expected_results, mut records, tx)) = queries.remove(&id.into()) {
