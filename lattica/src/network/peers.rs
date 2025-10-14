@@ -40,7 +40,13 @@ impl AddressBook {
     }
 
     pub fn peers(&self) -> Vec<PeerId> {
-        self.peers.keys().cloned().collect()
+        self.peers
+            .iter()
+            .filter_map(|(peer_id, info)| {
+                let has_direct = info.addresses().any(|(_, _, _, relayed, _)| !relayed);
+                if has_direct { Some(*peer_id) } else { None }
+            })
+            .collect()
     }
 
     pub fn info(&self, peer_id: &PeerId) -> Option<PeerInfo> {

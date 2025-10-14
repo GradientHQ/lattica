@@ -1,6 +1,9 @@
+use std::sync::Arc;
 use libp2p::Multiaddr;
 use libp2p::multiaddr::Protocol;
 use libp2p::multiaddr::PeerId;
+use tokio::sync::RwLock;
+use crate::network::AddressBook;
 
 pub fn get_transport_protocol(addr: &Multiaddr) -> Option<Protocol<'_>>  {
     addr.iter().nth(1)
@@ -28,6 +31,16 @@ pub fn is_relay_server(relay_addrs: &Vec<Multiaddr>, peer_id: PeerId) -> bool {
             if last == Protocol::P2p(peer_id) {
                 return true;
             }
+        }
+    }
+    false
+}
+
+pub async fn has_direct_connection(address_book: &Arc<RwLock<AddressBook>>, peer_id: &PeerId) -> bool {
+    let book = address_book.read().await;
+    if let Some(info) = book.info(peer_id) {
+        for (_, _, _, relayed, _) in info.addresses() {
+            if !relayed {return true;}
         }
     }
     false

@@ -891,11 +891,23 @@ async fn swarm_poll(
                     let _ = response.send(result);
                 }
                 Command::RpcSend(peer_id, request, response) => {
+                    // check direct connection
+                    if !common::has_direct_connection(&address_book, &peer_id).await {
+                        let _ = response.send(Err(anyhow!("no direct connection for peer {}", peer_id)));
+                        continue
+                    }
+                    
                     let message = rpc::RpcMessage::Request(request);
                     let request_id = swarm.behaviour_mut().request_response.send_request(&peer_id, message);
                     pending_requests.insert(request_id, response);
                 }
                 Command::RpcSendStream(peer_id, response) => {
+                    // check direct connection
+                    if !common::has_direct_connection(&address_book, &peer_id).await {
+                        let _ = response.send(Err(anyhow!("no direct connection for peer {}", peer_id)));
+                        continue
+                    }
+                    
                     let stream_control = swarm.behaviour().stream.new_control();
 
                     tokio::spawn(async move {
