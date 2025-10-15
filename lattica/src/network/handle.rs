@@ -80,44 +80,76 @@ pub(crate) async fn handle_incoming_stream(mut stream: Stream, services: Arc<RwL
                     data: Arc::from(complete_data),
                 };
 
-                match service.handle_stream(method_name, complete_request).await {
-                    Ok(stream_response) => {
-                        let chunk_size = 16 * 1024 * 1024; // 16M
-                        let total_chunks = (stream_response.data.len() + chunk_size - 1) / chunk_size;
-
-                        for index in 0..total_chunks {
-                            let start = index * chunk_size;
-                            let end = std::cmp::min(start + chunk_size, stream_response.data.len());
-                            let chunk = &stream_response.data[start..end];
-                            let is_last = index == total_chunks - 1;
-
-                            let mut stream_message = rpc::StreamMessage {
-                                id: stream_response.id.clone(),
-                                data: Cow::Borrowed(chunk),
-                                is_end: false,
-                            };
-
-                            if is_last {
-                                stream_message.is_end = true
+                match service.handle_stream_iter(method_name, rpc::StreamRequest{
+                    id: complete_request.id.clone(),
+                    method: complete_request.method.clone(),
+                    data: complete_request.data.clone(),
+                }).await {
+                    Ok(Some(mut rx)) => {
+                        let mut prev: Option<Vec<u8>> = None;
+                        while let Some(item) = rx.recv().await {
+                            if let Some(buf) = prev.take() {
+                                let frame = rpc::StreamFrame::Data(rpc::StreamMessage{
+                                    id: complete_request.id.clone(),
+                                    data: Cow::Borrowed(&buf),
+                                    is_end: false,
+                                });
+                                send_frame(&mut stream, frame).await?;
                             }
-
-
-                            let frame = rpc::StreamFrame::Data(stream_message);
+                            prev = Some(item);
+                        }
+                        if let Some(buf) = prev.take() {
+                            let frame = rpc::StreamFrame::Data(rpc::StreamMessage{
+                                id: complete_request.id.clone(),
+                                data: Cow::Borrowed(&buf),
+                                is_end: true,
+                            });
                             send_frame(&mut stream, frame).await?;
                         }
 
-                        let close_frame = rpc::StreamFrame::Close(stream_response.id.clone());
+                        let close_frame = rpc::StreamFrame::Close(complete_request.id.clone());
                         send_frame(&mut stream, close_frame).await?;
                     }
-                    Err(error) => {
-                        let error_frame = rpc::StreamFrame::Error(rpc::StreamError{
-                            id: req.id.clone(),
-                            error
-                        });
-                        send_frame(&mut stream, error_frame).await?;
+                    _ => {
+                        match service.handle_stream(method_name, complete_request).await {
+                            Ok(stream_response) => {
+                                let chunk_size = 16 * 1024 * 1024; // 16M
+                                let total_chunks = (stream_response.data.len() + chunk_size - 1) / chunk_size;
 
-                        let close_frame = rpc::StreamFrame::Close(req.id.clone());
-                        send_frame(&mut stream, close_frame).await?;
+                                for index in 0..total_chunks {
+                                    let start = index * chunk_size;
+                                    let end = std::cmp::min(start + chunk_size, stream_response.data.len());
+                                    let chunk = &stream_response.data[start..end];
+                                    let is_last = index == total_chunks - 1;
+
+                                    let mut stream_message = rpc::StreamMessage {
+                                        id: stream_response.id.clone(),
+                                        data: Cow::Borrowed(chunk),
+                                        is_end: false,
+                                    };
+
+                                    if is_last {
+                                        stream_message.is_end = true
+                                    }
+
+
+                                    let frame = rpc::StreamFrame::Data(stream_message);
+                                    send_frame(&mut stream, frame).await?;
+                                }
+                                let close_frame = rpc::StreamFrame::Close(stream_response.id.clone());
+                                send_frame(&mut stream, close_frame).await?;
+                            }
+                            Err(error) => {
+                                let error_frame = rpc::StreamFrame::Error(rpc::StreamError{
+                                    id: req.id.clone(),
+                                    error
+                                });
+                                send_frame(&mut stream, error_frame).await?;
+
+                                let close_frame = rpc::StreamFrame::Close(req.id.clone());
+                                send_frame(&mut stream, close_frame).await?;
+                            }
+                        }
                     }
                 }
             } else {

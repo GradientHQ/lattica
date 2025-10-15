@@ -11,6 +11,9 @@ use tokio::task::JoinHandle;
 use lattica::common::{retry_with_backoff, BytesBlock, RetryConfig};
 use cid::{Cid};
 use libp2p::kad::RecordKey;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::Receiver;
+use lattica::rpc::{RpcResult, StreamRequest};
 
 #[pyclass]
 pub struct LatticaSDK {
@@ -135,6 +138,53 @@ impl LFuture {
             })?;
             let awaitable = future.getattr("__await__")?.call0()?;
             Ok(awaitable.unbind())
+        })
+    }
+}
+
+#[pyclass]
+pub struct StreamIter {
+    rx: Arc<Mutex<Option<mpsc::Receiver<Vec<u8>>>>>,
+    runtime: Arc<Runtime>
+}
+
+#[pymethods]
+impl StreamIter {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&self) -> Option<Vec<u8>> {
+        // None => StopIteration
+        self.runtime.block_on(async {
+            let mut guard = self.rx.lock().await;
+            if let Some(rx) = guard.as_mut() {
+                rx.recv().await
+            } else {
+                None
+            }
+        })
+    }
+
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __anext__(&self) -> PyResult<PyObject> {
+        let rx_arc = self.rx.clone();
+        Python::with_gil(|py| {
+            let fut = pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                let mut guard = rx_arc.lock().await;
+                if let Some(rx) = guard.as_mut() {
+                    match rx.recv().await {
+                        Some(chunk) => Ok(chunk),
+                        None => Err(pyo3::exceptions::PyStopAsyncIteration::new_err("end")),
+                    }
+                } else {
+                    Err(pyo3::exceptions::PyStopAsyncIteration::new_err("end"))
+                }
+            })?;
+            Ok(fut.unbind())
         })
     }
 }
@@ -503,6 +553,25 @@ impl RpcClient {
             })
         })
     }
+
+    fn call_stream_iter(&self, method: &str, data: &[u8]) -> PyResult<StreamIter> {
+        let lattica = self.lattica.clone();
+        let runtime = self.runtime.clone();
+        let peer_id: PeerId = self.peer_id.parse()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid peer ID: {:?}", e)))?;
+        let method = method.to_string();
+        let data = data.to_vec();
+
+        let rx = runtime.block_on(async move {
+            lattica.call_stream_iter(peer_id, method, data).await
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to call stream iter: {:?}", e)))
+        })?;
+
+        Ok(StreamIter {
+            rx: Arc::new(Mutex::new(Some(rx))),
+            runtime: self.runtime.clone(),
+        })
+    }
 }
 
 struct PythonRpcService {
@@ -607,5 +676,51 @@ impl rpc::RpcService for PythonRpcService {
                 Err(e)
             }
         }
+    }
+
+    async fn handle_stream_iter(&self, method: &str, request: StreamRequest) -> RpcResult<Option<Receiver<Vec<u8>>>> {
+        let method_name = format!("_handle_stream_iter_{}", method);
+        let has_iter = Python::with_gil(|py| {
+            let inst = self.instance.bind(py);
+            inst.getattr(&method_name).is_ok()
+        });
+        if !has_iter {
+            return Ok(None);
+        }
+
+        let instance_ptr = Python::with_gil(|_| {self.instance.clone()});
+        let data = request.data.to_vec();
+
+        let (tx, rx) = mpsc::channel::<Vec<u8>>(16);
+
+        tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| {
+                let instance = instance_ptr.bind(py);
+                let Ok(handler) = instance.getattr(&method_name) else { return; };
+                let Ok(iterable) = handler.call1((data.as_slice(),)) else { return; };
+
+                if let Ok(iter) = iterable.try_iter() {
+                    for item in iter {
+                        match item {
+                            Ok(obj) => {
+                                if let Ok(b) = obj.extract::<Vec<u8>>() {
+                                    let _ = tx.blocking_send(b);
+                                } else if let Ok(b2) = obj.extract::<&[u8]>() {
+                                    let _ = tx.blocking_send(b2.to_vec());
+                                } else {
+                                    if let Ok(s) = obj.extract::<String>() {
+                                        let _ = tx.blocking_send(s.into_bytes());
+                                    } else {
+                                        continue
+                                    }
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+            });
+        });
+        Ok(Some(rx))
     }
 }
