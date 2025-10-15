@@ -303,7 +303,7 @@ impl LatticaBuilder {
     }
 }
 
-impl  Lattica  {
+impl Lattica {
     pub fn builder() -> LatticaBuilder {
         LatticaBuilder::new()
     }
@@ -591,6 +591,112 @@ impl  Lattica  {
             Err(err) => {
                 Err(anyhow!("{}", err))
             }
+        }
+    }
+
+    pub async fn call_stream_iter(&self, peer_id: PeerId, method: String, data: Vec<u8>) -> Result<mpsc::Receiver<Vec<u8>>> {
+        let (tx, rx) = oneshot::channel();
+        let request_id = Uuid::new_v4().to_string();
+        self.cmd.try_send(Command::RpcSendStream(peer_id, tx))?;
+
+        match rx.await? {
+            Ok(mut stream) => {
+                // init request
+                let initial_request = rpc::StreamRequest {
+                    id: request_id.clone(),
+                    method,
+                    data: Arc::new([]),
+                };
+
+                let request_frame = rpc::StreamFrame::Request(initial_request);
+                let request_data = bincode::encode_to_vec(&request_frame, standard())?;
+                let len = request_data.len() as u32;
+                stream.write_all(&len.to_be_bytes()).await?;
+                stream.write_all(&request_data).await?;
+                stream.flush().await?;
+
+                // send request
+                let chunk_size = 16 * 1024 * 1024; // 16MB
+                let total_chunks = (data.len() + chunk_size - 1) / chunk_size;
+                let mut frame_buffer = Vec::with_capacity(64 * 1024 + 1024);
+
+                if total_chunks == 0 {
+
+                    let message = rpc::StreamMessage {
+                        id: request_id.clone(),
+                        data: Cow::Borrowed(&[]),
+                        is_end: true,
+                    };
+
+                    frame_buffer.clear();
+                    bincode::encode_into_std_write(&rpc::StreamFrame::Data(message), &mut frame_buffer, standard())?;
+                    let frame_len = frame_buffer.len() as u32;
+
+                    stream.write_all(&frame_len.to_be_bytes()).await?;
+                    stream.write_all(&frame_buffer).await?;
+                } else {
+                    for index in 0..total_chunks {
+                        let start = index * chunk_size;
+                        let end = std::cmp::min(start + chunk_size, data.len());
+                        let is_last = index == total_chunks - 1;
+
+                        let message = rpc::StreamMessage {
+                            id: request_id.clone(),
+                            data: Cow::Borrowed(&data[start..end]),
+                            is_end: is_last,
+                        };
+
+                        let data_frame = rpc::StreamFrame::Data(message);
+                        frame_buffer.clear();
+                        bincode::encode_into_std_write(&data_frame, &mut frame_buffer, standard())?;
+                        let frame_len = frame_buffer.len() as u32;
+
+                        stream.write_all(&frame_len.to_be_bytes()).await?;
+                        stream.write_all(&frame_buffer).await?;
+                    }
+                }
+                stream.flush().await?;
+
+                let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(16);
+
+                tokio::spawn(async move {
+                    let mut buf = Vec::with_capacity(8 * 1024);
+
+                    loop {
+                        let mut len_buf = [0u8; 4];
+                        if let Err(_e) = stream.read_exact(&mut len_buf).await {
+                            break;
+                        }
+                        let len = u32::from_be_bytes(len_buf) as usize;
+
+                        buf.resize(len, 0);
+                        if let Err(_e) = stream.read_exact(&mut buf).await {
+                            break;
+                        }
+
+                        if let Ok((frame, _)) = bincode::decode_from_slice::<rpc::StreamFrame, _>(&buf, standard()) {
+                            match frame {
+                                rpc::StreamFrame::Data(msg) => {
+                                    if out_tx.send(msg.data.to_vec()).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                rpc::StreamFrame::Error(err) => {
+                                    break;
+                                }
+                                rpc::StreamFrame::Close(_) => {
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                });
+                Ok(out_rx)
+            }
+            Err(err) => Err(anyhow!("{}", err)),
         }
     }
 

@@ -103,6 +103,7 @@ class ConnectionHandlerMeta(type):
         # Collect RPC methods and stream methods
         rpc_methods = set()
         stream_methods = set()
+        stream_iter_methods = set()
 
         # Inherit methods from base classes
         for base in bases:
@@ -110,17 +111,22 @@ class ConnectionHandlerMeta(type):
                 rpc_methods.update(base._rpc_methods)
             if hasattr(base, '_stream_methods'):
                 stream_methods.update(base._stream_methods)
+            if hasattr(base, '_stream_iter_methods'):
+                stream_iter_methods.update(base._stream_iter_methods)
 
         # Scan current class methods
         for attr_name, attr_value in attrs.items():
             if hasattr(attr_value, '_is_rpc_method'):
-                if hasattr(attr_value, '_is_stream_method') and attr_value._is_stream_method:
+                if getattr(attr_value, '_is_stream_iter_method', False):
+                    stream_iter_methods.add(attr_name)
+                elif getattr(attr_value, '_is_stream_method', False):
                     stream_methods.add(attr_name)
                 else:
                     rpc_methods.add(attr_name)
 
         attrs['_rpc_methods'] = list(rpc_methods)
         attrs['_stream_methods'] = list(stream_methods)
+        attrs['_stream_iter_methods'] = list(stream_iter_methods)
 
         # Create handlers for RPC methods
         for method_name in rpc_methods:
@@ -132,9 +138,13 @@ class ConnectionHandlerMeta(type):
             if f'_handle_stream_{method_name}' not in attrs:
                 attrs[f'_handle_stream_{method_name}'] = mcs._create_stream_handler(method_name)
 
+        for method_name in stream_iter_methods:
+            if f'_handle_stream_{method_name}' not in attrs:
+                attrs[f'_handle_stream_iter_{method_name}'] = mcs._create_stream_iter_handler(method_name)
+
         # Save method type information for client use
         attrs['_method_type_info'] = {}
-        for method_name in rpc_methods | stream_methods:
+        for method_name in rpc_methods | stream_methods | stream_iter_methods:
             if method_name in attrs:
                 method = attrs[method_name]
                 attrs['_method_type_info'][method_name] = get_method_type_hints(method)
@@ -207,6 +217,35 @@ class ConnectionHandlerMeta(type):
         return handler
 
     @staticmethod
+    def _create_stream_iter_handler(method_name: str):
+        def handler(self, data: bytes) ->bytes:
+            try:
+                # Get method and type information
+                method = getattr(self, method_name)
+                param_types, _ = get_method_type_hints(method)
+
+                # Smart deserialization of request data
+                if data:
+                    sig = inspect.signature(method)
+                    params = [p for name, p in sig.parameters.items() if name != 'self']
+
+                    if len(params) == 1 and params[0].name in param_types:
+                        # Single protobuf parameter
+                        proto_type = param_types[params[0].name]
+                        request_data = smart_deserialize(data, proto_type)
+                    else:
+                        # Other cases
+                        request_data = smart_deserialize(data)
+                else:
+                    request_data = None
+
+                # Call method
+                return ConnectionHandlerMeta._call_method(method, request_data)
+            except Exception as e:
+                raise RuntimeError(f"Stream iter method {method_name} failed: {e}")
+        return handler
+
+    @staticmethod
     def _call_method(method, request_data):
         if request_data is not None:
             sig = inspect.signature(method)
@@ -229,10 +268,11 @@ class ConnectionHandlerMeta(type):
             return method()
 
 class MethodStub:
-    def __init__(self, stub: 'ServiceStub', method_name: str, is_stream: bool = False):
+    def __init__(self, stub: 'ServiceStub', method_name: str, is_stream: bool = False, is_stream_iter: bool = False):
         self.stub = stub
         self.method_name = method_name
         self.is_stream = is_stream
+        self.is_stream_iter = is_stream_iter
 
     def __call__(self, *args, **kwargs):
         # Handle parameters - support protobuf auto-serialization
@@ -262,7 +302,11 @@ class MethodStub:
                 param_types, return_type = method_info
                 expected_return_type = return_type
 
-        if self.is_stream:
+        if self.is_stream_iter:
+            return self.stub.connection_handler._call_stream_iter_method(
+                self.stub.peer_id, full_method_name, serialized_data
+            )
+        elif self.is_stream:
             # Stream call
             future = self.stub.connection_handler._call_stream_method(
                 self.stub.peer_id, full_method_name, serialized_data
@@ -289,8 +333,9 @@ class ServiceStub:
             return self._method_cache[name]
 
         is_stream = name in getattr(self.connection_handler, '_stream_methods', [])
+        is_stream_iter = name in getattr(self.connection_handler, '_stream_iter_methods', [])
 
-        method_stub = MethodStub(self, name, is_stream)
+        method_stub = MethodStub(self, name, is_stream, is_stream_iter)
         self._method_cache[name] = method_stub
         return method_stub
 
@@ -331,6 +376,13 @@ class ConnectionHandler(metaclass=ConnectionHandlerMeta):
             return client.call_stream(method_name, data)
         except Exception as e:
             raise e
+
+    def _call_stream_iter_method(self, peer_id: str, method_name: str, data: bytes):
+        try:
+            client = self.lattica_instance.get_client(peer_id)
+            return client.call_stream_iter(method_name, data)
+        except Exception as e:
+            raise
 
 class FutureWrapper:
     def __init__(self, future, expected_return_type, is_stream=False):

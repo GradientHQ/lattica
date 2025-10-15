@@ -10,6 +10,7 @@ use libp2p::{StreamProtocol};
 use std::fmt::Debug;
 use std::sync::Arc;
 use crate::common::CompressionAlgorithm;
+use tokio::sync::mpsc;
 
 pub const RPC_REQUEST_RESPONSE_PROTOCOL: StreamProtocol = StreamProtocol::new("/rpc/req-resp/1.0.0");
 pub const RPC_STREAM_PROTOCOL: StreamProtocol = StreamProtocol::new("/rpc/stream/1.0.0");
@@ -91,6 +92,7 @@ pub trait RpcService: Send + Sync {
     fn methods(&self) -> Vec<String>;
     async fn handle_request(&self, method: &str, request: RpcRequest) -> RpcResult<RpcResponse>;
     async fn handle_stream(&self, method: &str, request: StreamRequest) -> RpcResult<StreamResponse>;
+    async fn handle_stream_iter(&self, method: &str, request: StreamRequest) -> RpcResult<Option<mpsc::Receiver<Vec<u8>>>>;
 }
 
 #[derive(Debug, Clone, Default)]

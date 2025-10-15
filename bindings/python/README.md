@@ -84,7 +84,7 @@ if votes_result:
 The RPC example demonstrates remote procedure calls with support for complex data types and streaming.
 
 ```python
-from lattica import Lattica, rpc_method, rpc_stream, ConnectionHandler
+from lattica import Lattica, rpc_method, rpc_stream, rpc_stream_iter, ConnectionHandler
 
 
 
@@ -98,6 +98,12 @@ class MyService(ConnectionHandler):
     def process_data(self, data: list) -> list:
         return data
 
+    @rpc_stream_iter
+    def stream_rpc_iter(self):
+        while True:
+            text = "hello world"
+            yield text
+            
 # Create client1 as RPC server and bootstrap node
 lattica = Lattica.builder()
     .build()
@@ -117,6 +123,10 @@ result = stub.add(10, 20)  # Returns 30
 num_floats = int(2 * 1024 * 1024 * 1024) // 8 #2GB
 test_data = [random.random() for _ in range(num_floats)]
 result = stub.process_data(test_data)
+
+# stream iter call
+for text in stub.stream_rpc_iter():
+    print(f"recv: {text}")
 
 ```
 

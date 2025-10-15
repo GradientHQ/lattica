@@ -1,7 +1,7 @@
 import asyncio
 import time
 import sys
-from lattica import Lattica, rpc_method, rpc_stream, ConnectionHandler
+from lattica import Lattica, rpc_method, rpc_stream, rpc_stream_iter, ConnectionHandler
 import pickle
 
 class MockProtoRequest:
@@ -59,6 +59,12 @@ class RPCHandler(ConnectionHandler):
             message=f"Processed data of size {len(request.data)}",
             data=None
         )
+
+    @rpc_stream_iter
+    def stream_rpc_iter(self):
+        while True:
+            text = "hello world"
+            yield text
 
 async def run_server():
     lattica_inst = Lattica.builder().with_key_path("/tmp").build()
@@ -120,8 +126,12 @@ async def run_client():
         print(f"result: {result.message}")
         print(f"Total transfer time: {transfer_time:.2f}s")
 
+        print("\n=== Testing Stream iter RPC ===")
+        for text in stub.stream_rpc_iter():
+            print(f"recv: {text}")
+
     except Exception as e:
-        print(f"Client error: {e}")
+            print(f"Client error: {e}")
 
 
 # node1: python rpc.py
