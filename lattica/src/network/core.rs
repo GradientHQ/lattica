@@ -16,13 +16,14 @@ use futures::future::Either;
 use tokio::task::JoinHandle;
 use fnv::{FnvHashMap};
 use uuid::Uuid;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use std::time::{Duration, Instant};
 use blockstore::{Blockstore, SledBlockstore};
 use blockstore::block::Block;
 use crate::common::{compress_data, should_compress, BytesBlock, CompressionAlgorithm, CompressionLevel, QueryId};
 use cid::Cid;
+use futures::io::{WriteHalf};
 
 pub enum Command{
     PutRecord(Record, Quorum, oneshot::Sender<Result<()>>),
@@ -30,7 +31,7 @@ pub enum Command{
     RpcConnect(PeerId, oneshot::Sender<Result<()>>),
     Dial(Multiaddr, oneshot::Sender<Result<()>>),
     RpcSend(PeerId, rpc::RpcRequest, oneshot::Sender<Result<rpc::RpcResponse>>),
-    RpcSendStream(PeerId, oneshot::Sender<Result<Stream>>),
+    RpcGetOrCreateStreamHandle(PeerId, oneshot::Sender<Result<Arc<StreamHandle>>>),
     RpcRegister(Box<dyn rpc::RpcService>, oneshot::Sender<Result<()>>),
     RendezvousRegister(PeerId, Option<String>, Option<u64>, oneshot::Sender<Result<()>>),
     RendezvousDiscover(PeerId, Option<String>, Option<u64>, oneshot::Sender<Result<Vec<PeerId>>>),
@@ -303,6 +304,187 @@ impl LatticaBuilder {
     }
 }
 
+pub struct StreamHandle {
+    writer: Arc<Mutex<WriteHalf<Stream>>>,
+
+    // request_id -> response channel (for stream_iter)
+    pending_stream_calls: Arc<RwLock<HashMap<String, mpsc::Sender<Vec<u8>>>>>,
+    // request_id -> accumulated data (for call_stream)
+    pending_unary_calls: Arc<RwLock<HashMap<String, (Vec<u8>, oneshot::Sender<Vec<u8>>)>>>,
+    _read_task: Arc<JoinHandle<()>>,
+}
+
+impl StreamHandle {
+    fn new(stream: Stream, peer_id: PeerId) -> Self {
+        let (read_half, write_half) = stream.split();
+        let reader = Arc::new(Mutex::new(read_half));
+        let writer = Arc::new(Mutex::new(write_half));
+
+        let pending_stream_calls: Arc<RwLock<HashMap<String, mpsc::Sender<Vec<u8>>>>>
+            = Arc::new(RwLock::new(HashMap::new()));
+        let pending_unary_calls: Arc<RwLock<HashMap<String, (Vec<u8>, oneshot::Sender<Vec<u8>>)>>>
+            = Arc::new(RwLock::new(HashMap::new()));
+
+        // run background task: response by request id
+        let reader_clone = reader.clone();
+        let pending_stream_clone = pending_stream_calls.clone();
+        let pending_unary_clone = pending_unary_calls.clone();
+
+        let read_task = tokio::spawn(async move {
+            let mut buf = Vec::with_capacity(8 * 1024);
+
+            loop {
+                // read head frame
+                let mut r = reader_clone.lock().await;
+
+                let mut len_buf = [0u8; 4];
+                if r.read_exact(&mut len_buf).await.is_err() {
+                    break;
+                }
+                let len = u32::from_be_bytes(len_buf) as usize;
+
+                buf.resize(len, 0);
+                if r.read_exact(&mut buf).await.is_err() {
+                    break;
+                }
+
+
+                drop(r);
+
+                // handle frame
+                if let Ok((frame, _)) = bincode::decode_from_slice::<rpc::StreamFrame, _>(&buf, standard()) {
+                    match frame {
+                        rpc::StreamFrame::Data(msg) => {
+                            if let Some(tx) = pending_stream_clone.read().await.get(&msg.id) {
+                                let _ = tx.send(msg.data.to_vec()).await;
+                            } else if let Some((acc, _tx)) = pending_unary_clone.write().await.get_mut(&msg.id) {
+                                acc.extend_from_slice(&msg.data);
+                            }
+                        }
+                        rpc::StreamFrame::Close(id) => {
+                            if let Some(tx) = pending_stream_clone.write().await.remove(&id) {
+                                drop(tx);
+                            }
+                            if let Some((data, tx)) = pending_unary_clone.write().await.remove(&id) {
+                                let _ = tx.send(data);
+                            }
+                        }
+                        rpc::StreamFrame::Error(err) => {
+                            pending_stream_clone.write().await.remove(&err.id);
+                            pending_unary_clone.write().await.remove(&err.id);
+                        }
+                        _ => {}
+                    }
+                } else {
+                    tracing::error!("Failed to decode frame for peer {}", peer_id);
+                    break;
+                }
+            }
+
+            // connection close, clean
+            tracing::info!("Cleaning up pending calls for peer {}", peer_id);
+            pending_stream_clone.write().await.clear();
+            pending_unary_clone.write().await.clear();
+        });
+
+        Self {
+            writer,
+            pending_stream_calls,
+            pending_unary_calls,
+            _read_task: Arc::new(read_task),
+        }
+    }
+
+    async fn is_alive(&self) -> bool {
+        let mut w = self.writer.lock().await;
+        w.flush().await.is_ok()
+    }
+
+    async fn send_request(&self, request_id: String, method: String, data: Vec<u8>) -> Result<()> {
+        let mut w = self.writer.lock().await;
+
+        // send initial request
+        let initial_request = rpc::StreamRequest {
+            id: request_id.clone(),
+            method,
+            data: Arc::new([]),
+        };
+        let request_frame = rpc::StreamFrame::Request(initial_request);
+        let request_data = bincode::encode_to_vec(&request_frame, standard())?;
+        let len = request_data.len() as u32;
+        // write len frame
+        w.write_all(&len.to_be_bytes()).await?;
+        w.write_all(&request_data).await?;
+        w.flush().await?;
+
+        // write data frame
+        let chunk_size = 16 * 1024 * 1024; // 16MB peer frame
+        let total_chunks = if data.is_empty() { 0 } else { (data.len() + chunk_size - 1) / chunk_size };
+        let mut frame_buffer = Vec::with_capacity(64 * 1024 + 1024);
+
+        if total_chunks == 0 {
+            let message = rpc::StreamMessage {
+                id: request_id.clone(),
+                data: Cow::Borrowed(&[]),
+                is_end: true,
+            };
+            frame_buffer.clear();
+            bincode::encode_into_std_write(&rpc::StreamFrame::Data(message), &mut frame_buffer, standard())?;
+            let frame_len = frame_buffer.len() as u32;
+            w.write_all(&frame_len.to_be_bytes()).await?;
+            w.write_all(&frame_buffer).await?;
+            w.flush().await?;
+        } else {
+            for index in 0..total_chunks {
+                let start = index * chunk_size;
+                let end = std::cmp::min(start + chunk_size, data.len());
+                let is_last = index == total_chunks - 1;
+
+                let message = rpc::StreamMessage {
+                    id: request_id.clone(),
+                    data: Cow::Borrowed(&data[start..end]),
+                    is_end: is_last,
+                };
+
+                frame_buffer.clear();
+                bincode::encode_into_std_write(&rpc::StreamFrame::Data(message), &mut frame_buffer, standard())?;
+                let frame_len = frame_buffer.len() as u32;
+                w.write_all(&frame_len.to_be_bytes()).await?;
+                w.write_all(&frame_buffer).await?;
+                w.flush().await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn cancel_request(&self, request_id: &str) -> Result<()> {
+        // send cancel frame
+        let cancel_frame = rpc::StreamFrame::Cancel(request_id.to_string());
+        let encoded = bincode::encode_to_vec(&cancel_frame, standard())?;
+        let len = (encoded.len() as u32).to_be_bytes();
+
+        let mut writer = self.writer.lock().await;
+        writer.write_all(&len).await?;
+        writer.write_all(&encoded).await?;
+        writer.flush().await?;
+        drop(writer);
+
+        // clean pending request
+        self.pending_stream_calls.write().await.remove(request_id);
+        Ok(())
+    }
+
+    async fn register_unary_call(&self, request_id: String, tx: oneshot::Sender<Vec<u8>>) {
+        let mut pending = self.pending_unary_calls.write().await;
+        pending.insert(request_id, (Vec::new(), tx));
+    }
+
+    async fn register_stream_call(&self, request_id: String, tx: mpsc::Sender<Vec<u8>>) {
+        let mut pending = self.pending_stream_calls.write().await;
+        pending.insert(request_id, tx);
+    }
+}
+
 impl Lattica {
     pub fn builder() -> LatticaBuilder {
         LatticaBuilder::new()
@@ -507,196 +689,49 @@ impl Lattica {
     }
 
     pub async fn call_stream(&self, peer_id: PeerId, method: String, data: Vec<u8>) -> Result<Vec<u8>> {
-        let (tx, rx) = oneshot::channel();
         let request_id = Uuid::new_v4().to_string();
-        self.cmd.try_send(Command::RpcSendStream(peer_id, tx))?;
+        let (tx, rx) = oneshot::channel();
+        self.cmd.try_send(Command::RpcGetOrCreateStreamHandle(peer_id, tx))?;
+        let handle = rx.await??;
 
-        match rx.await? {
-            Ok(mut stream) => {
-                let initial_request = rpc::StreamRequest {
-                    id: request_id.clone(),
-                    method,
-                    data: Arc::new([]),
-                };
+        // send request
+        let (response_tx, response_rx) = oneshot::channel();
+        handle.register_unary_call(request_id.clone(), response_tx).await;
+        handle.send_request(request_id, method, data).await?;
 
-                let request_frame = rpc::StreamFrame::Request(initial_request);
-                let request_data = bincode::encode_to_vec(&request_frame, standard())?;
-                let len = request_data.len() as u32;
-                
-                stream.write_all(&len.to_be_bytes()).await?;
-                stream.write_all(&request_data).await?;
-                stream.flush().await?;
+        // get response
+        let result = response_rx.await
+            .map_err(|_| anyhow!("Response channel closed"))?;
 
-                // chunk send
-                let chunk_size = 16 * 1024 * 1024; // 16M
-                let total_chunks = (data.len() + chunk_size - 1) / chunk_size;
-
-                let mut frame_buffer = Vec::with_capacity(64 * 1024 + 1024);
-
-                for index in 0..total_chunks {
-                    let start = index * chunk_size;
-                    let end = std::cmp::min(start + chunk_size, data.len());
-                    let is_last = index == total_chunks - 1;
-
-                    let message = rpc::StreamMessage {
-                        id: request_id.clone(),
-                        data: Cow::Borrowed(&data[start..end]),
-                        is_end: is_last,
-                    };
-
-                    let data_frame = rpc::StreamFrame::Data(message);
-                    frame_buffer.clear();
-                    bincode::encode_into_std_write(&data_frame, &mut frame_buffer, standard())?;
-                    let frame_len = frame_buffer.len() as u32;
-
-                    stream.write_all(&frame_len.to_be_bytes()).await?;
-                    stream.write_all(&frame_buffer).await?;
-                    stream.flush().await?;
-                }
-
-                // get response chunks
-                let mut complete_data = Vec::with_capacity(64 * 1024);
-                let mut buf = Vec::with_capacity(8 * 1024);
-                loop {
-                    let mut len_buf = [0u8; 4];
-                    stream.read_exact(&mut len_buf).await.map_err(|e| anyhow!("call stream read len failed: {:?}", e))?;
-                    let len = u32::from_be_bytes(len_buf) as usize;
-
-                    buf.resize(len, 0);
-                    stream.read_exact(&mut buf).await.map_err(|e| anyhow!("call stream read body failed: {:?}", e))?;
-
-                    if let Ok((frame, _)) = bincode::decode_from_slice(&buf, standard()) {
-                        match frame {
-                            rpc::StreamFrame::Data(msg) => {
-                                complete_data.extend_from_slice(&msg.data);
-
-                                if msg.is_end {
-                                    break;
-                                }
-                            }
-                            rpc::StreamFrame::Error(err ) => {
-                                return Err(anyhow!("stream error: {:?}", err));
-                            }
-                            rpc::StreamFrame::Close(_) => {
-                                break;
-                            }
-                            _ => {}
-                        }
-                    } else {
-                        return Err(anyhow!("Failed to decode response frame"));
-                    }
-                }
-                Ok(complete_data)
-            }
-            Err(err) => {
-                Err(anyhow!("{}", err))
-            }
-        }
+        Ok(result)
     }
 
-    pub async fn call_stream_iter(&self, peer_id: PeerId, method: String, data: Vec<u8>) -> Result<mpsc::Receiver<Vec<u8>>> {
-        let (tx, rx) = oneshot::channel();
+    pub async fn call_stream_iter(&self, peer_id: PeerId, method: String, data: Vec<u8>) -> Result<(String, mpsc::Receiver<Vec<u8>>)> {
         let request_id = Uuid::new_v4().to_string();
-        self.cmd.try_send(Command::RpcSendStream(peer_id, tx))?;
+        // get stream handle
+        let (tx, rx) = oneshot::channel();
+        self.cmd.try_send(Command::RpcGetOrCreateStreamHandle(peer_id, tx))?;
+        let handle = rx.await??;
 
-        match rx.await? {
-            Ok(mut stream) => {
-                // init request
-                let initial_request = rpc::StreamRequest {
-                    id: request_id.clone(),
-                    method,
-                    data: Arc::new([]),
-                };
+        // send request
+        let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(16);
+        handle.register_stream_call(request_id.clone(), out_tx).await;
+        handle.send_request(request_id.clone(), method, data).await?;
 
-                let request_frame = rpc::StreamFrame::Request(initial_request);
-                let request_data = bincode::encode_to_vec(&request_frame, standard())?;
-                let len = request_data.len() as u32;
-                stream.write_all(&len.to_be_bytes()).await?;
-                stream.write_all(&request_data).await?;
-                stream.flush().await?;
+        Ok((request_id, out_rx))
+    }
 
-                // send request
-                let chunk_size = 16 * 1024 * 1024; // 16MB
-                let total_chunks = (data.len() + chunk_size - 1) / chunk_size;
-                let mut frame_buffer = Vec::with_capacity(64 * 1024 + 1024);
+    pub async fn cancel_stream_iter(&self, peer_id: PeerId, request_id: String) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd.try_send(Command::RpcGetOrCreateStreamHandle(peer_id, tx))?;
 
-                if total_chunks == 0 {
-
-                    let message = rpc::StreamMessage {
-                        id: request_id.clone(),
-                        data: Cow::Borrowed(&[]),
-                        is_end: true,
-                    };
-
-                    frame_buffer.clear();
-                    bincode::encode_into_std_write(&rpc::StreamFrame::Data(message), &mut frame_buffer, standard())?;
-                    let frame_len = frame_buffer.len() as u32;
-
-                    stream.write_all(&frame_len.to_be_bytes()).await?;
-                    stream.write_all(&frame_buffer).await?;
-                } else {
-                    for index in 0..total_chunks {
-                        let start = index * chunk_size;
-                        let end = std::cmp::min(start + chunk_size, data.len());
-                        let is_last = index == total_chunks - 1;
-
-                        let message = rpc::StreamMessage {
-                            id: request_id.clone(),
-                            data: Cow::Borrowed(&data[start..end]),
-                            is_end: is_last,
-                        };
-
-                        let data_frame = rpc::StreamFrame::Data(message);
-                        frame_buffer.clear();
-                        bincode::encode_into_std_write(&data_frame, &mut frame_buffer, standard())?;
-                        let frame_len = frame_buffer.len() as u32;
-
-                        stream.write_all(&frame_len.to_be_bytes()).await?;
-                        stream.write_all(&frame_buffer).await?;
-                    }
-                }
-                stream.flush().await?;
-
-                let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(16);
-
-                tokio::spawn(async move {
-                    let mut buf = Vec::with_capacity(8 * 1024);
-
-                    loop {
-                        let mut len_buf = [0u8; 4];
-                        if let Err(_e) = stream.read_exact(&mut len_buf).await {
-                            break;
-                        }
-                        let len = u32::from_be_bytes(len_buf) as usize;
-
-                        buf.resize(len, 0);
-                        if let Err(_e) = stream.read_exact(&mut buf).await {
-                            break;
-                        }
-
-                        if let Ok((frame, _)) = bincode::decode_from_slice::<rpc::StreamFrame, _>(&buf, standard()) {
-                            match frame {
-                                rpc::StreamFrame::Data(msg) => {
-                                    if out_tx.send(msg.data.to_vec()).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                rpc::StreamFrame::Error(err) => {
-                                    break;
-                                }
-                                rpc::StreamFrame::Close(_) => {
-                                    break;
-                                }
-                                _ => {}
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                });
-                Ok(out_rx)
+        match rx.await {
+            Ok(Ok(handle)) => {
+                handle.cancel_request(&request_id).await?;
+                Ok(())
             }
-            Err(err) => Err(anyhow!("{}", err)),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(anyhow!("Failed to get stream handle: {:?}", e)),
         }
     }
 
@@ -824,6 +859,7 @@ async fn swarm_poll(
     let mut pending_requests: HashMap<OutboundRequestId, oneshot::Sender<Result<rpc::RpcResponse>>> = HashMap::new();
     let mut stream_control = swarm.behaviour().stream.new_control();
     let mut incoming_streams =stream_control.accept(rpc::RPC_STREAM_PROTOCOL).unwrap();
+    let mut stream_handles: HashMap<PeerId, Arc<StreamHandle>> = HashMap::new();
 
     let services_stream = services.clone();
 
@@ -846,6 +882,7 @@ async fn swarm_poll(
 
     let mut queries = FnvHashMap::<QueryId, QueryChannel>::default();
     let mut cmd_rx = ReceiverStream::new(cmd_rx);
+
     loop {
         match future::select(
             future::poll_fn(|cx| {
@@ -1007,25 +1044,37 @@ async fn swarm_poll(
                     let request_id = swarm.behaviour_mut().request_response.send_request(&peer_id, message);
                     pending_requests.insert(request_id, response);
                 }
-                Command::RpcSendStream(peer_id, response) => {
+                Command::RpcGetOrCreateStreamHandle(peer_id, response) => {
                     // check direct connection
                     if !common::has_direct_connection(&address_book, &peer_id).await {
+                        stream_handles.remove(&peer_id);
                         let _ = response.send(Err(anyhow!("no direct connection for peer {}", peer_id)));
                         continue
                     }
-                    
+
+                    // check stream handle
+                    if let Some(handle) = stream_handles.get(&peer_id) {
+                        if handle.is_alive().await {
+                            let _ = response.send(Ok(handle.clone()));
+                            continue
+                        } else {
+                            stream_handles.remove(&peer_id);
+                        }
+                    }
+
+                    // create stream handle
                     let stream_control = swarm.behaviour().stream.new_control();
 
-                    tokio::spawn(async move {
-                        match handle_stream_request(peer_id, stream_control).await {
-                            Ok(stream) => {
-                                let _ = response.send(Ok(stream));
-                            }
-                            Err(e) => {
-                                let _ = response.send(Err(e));
-                            }
+                    match handle_stream_request(peer_id, stream_control).await {
+                        Ok(stream) => {
+                            let handle = Arc::new(StreamHandle::new(stream, peer_id));
+                            stream_handles.insert(peer_id, handle.clone());
+                            let _ = response.send(Ok(handle));
                         }
-                    });
+                        Err(e) => {
+                            let _ = response.send(Err(e));
+                        }
+                    }
                 }
                 Command::RpcRegister(service, response) => {
                     let service_name = service.service_name().to_string();
