@@ -356,7 +356,9 @@ impl StreamHandle {
                     match frame {
                         rpc::StreamFrame::Data(msg) => {
                             if let Some(tx) = pending_stream_clone.read().await.get(&msg.id) {
-                                let _ = tx.send(msg.data.to_vec()).await;
+                                if tx.try_send(msg.data.to_vec()).is_err() {
+                                    pending_stream_clone.write().await.remove(&msg.id);
+                                }
                             } else if let Some((acc, _tx)) = pending_unary_clone.write().await.get_mut(&msg.id) {
                                 acc.extend_from_slice(&msg.data);
                             }
@@ -714,7 +716,7 @@ impl Lattica {
         let handle = rx.await??;
 
         // send request
-        let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(16);
+        let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(512);
         handle.register_stream_call(request_id.clone(), out_tx).await;
         handle.send_request(request_id.clone(), method, data).await?;
 

@@ -116,6 +116,7 @@ pub(crate) async fn handle_incoming_stream(stream: Stream, services: Arc<RwLock<
                                 while let Some(item) = rx.recv().await {
                                     // check cancel
                                     if cancel_flag.load(Ordering::Relaxed) {
+                                        drop(rx);
                                         let close_frame = rpc::StreamFrame::Close(request_id_clone.clone());
                                         let _ = send_frame(&writer_clone, close_frame).await;
                                         cancel_flags_clone.write().await.remove(&request_id_clone);
@@ -132,7 +133,6 @@ pub(crate) async fn handle_incoming_stream(stream: Stream, services: Arc<RwLock<
                                     }
                                 }
                                 if !cancel_flag.load(Ordering::Relaxed) {
-                                    tracing::info!("Stream completed normally for {}", request_id_clone);
                                     let close_frame = rpc::StreamFrame::Close(request_id_clone.clone());
                                     let _ = send_frame(&writer_clone, close_frame).await;
                                     cancel_flags_clone.write().await.remove(&request_id_clone);

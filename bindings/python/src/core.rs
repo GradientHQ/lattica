@@ -739,16 +739,18 @@ impl rpc::RpcService for PythonRpcService {
                     for item in iter {
                         match item {
                             Ok(obj) => {
-                                if let Ok(b) = obj.extract::<Vec<u8>>() {
-                                    let _ = tx.blocking_send(b);
+                                let send_result = if let Ok(b) = obj.extract::<Vec<u8>>() {
+                                    tx.blocking_send(b)
                                 } else if let Ok(b2) = obj.extract::<&[u8]>() {
-                                    let _ = tx.blocking_send(b2.to_vec());
+                                    tx.blocking_send(b2.to_vec())
+                                } else if let Ok(s) = obj.extract::<String>() {
+                                    tx.blocking_send(s.into_bytes())
                                 } else {
-                                    if let Ok(s) = obj.extract::<String>() {
-                                        let _ = tx.blocking_send(s.into_bytes());
-                                    } else {
-                                        continue
-                                    }
+                                    continue;
+                                };
+
+                                if send_result.is_err() {
+                                    break;
                                 }
                             }
                             Err(_) => break,
