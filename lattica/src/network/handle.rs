@@ -13,165 +13,207 @@ use std::collections::HashMap;
 use bincode::config::standard;
 use fnv::{FnvHashMap};
 use libp2p_stream::Control;
-use tokio::sync::{ oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use crate::common::{compress_data, decompress_data, should_compress, BytesBlock, QueryId, P2P_CIRCUIT_TOPIC};
 use libp2p::kad::{AddProviderOk, GetProvidersOk};
+use std::sync::atomic::{AtomicBool, Ordering};
+use futures::io::{WriteHalf};
 
-pub(crate) async fn handle_incoming_stream(mut stream: Stream, services: Arc<RwLock<HashMap<String, Box<dyn rpc::RpcService>>>>) -> Result<()> {
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    let mut buf = vec![0u8; len];
-    stream.read_exact(&mut buf).await?;
-    let frame: rpc::StreamFrame = bincode::decode_from_slice(&buf, standard()).map(|(data, _)| data)?;
+pub(crate) async fn handle_incoming_stream(stream: Stream, services: Arc<RwLock<HashMap<String, Box<dyn rpc::RpcService>>>>) -> Result<()> {
+    // split writer and reader
+    let (mut reader, writer) = stream.split();
+    let writer = Arc::new(Mutex::new(writer));
+    let cancel_flags: Arc<RwLock<HashMap<String, Arc<AtomicBool>>>> = Arc::new(RwLock::new(HashMap::new()));
 
-    match frame {
-        rpc::StreamFrame::Request(req) => {
-            let parts: Vec<&str> = req.method.split('.').collect();
-            if parts.len() != 2 {
-                let error_frame = rpc::StreamFrame::Error(rpc::StreamError{
-                    id: req.id,
-                    error: "Invalid method format".to_string()
-                });
-                send_frame(&mut stream, error_frame).await?;
-                return Ok(());
+    // channel for pass frame
+    let (frame_tx, mut frame_rx) = mpsc::channel::<rpc::StreamFrame>(32);
+
+    let frame_tx_clone = frame_tx.clone();
+    tokio::spawn(async move {
+        let mut buf = Vec::with_capacity(8 * 1024);
+        loop {
+            let mut len_buf = [0u8; 4];
+            if reader.read_exact(&mut len_buf).await.is_err() {
+                break;
+            }
+            let len = u32::from_be_bytes(len_buf) as usize;
+            buf.resize(len, 0);
+            if reader.read_exact(&mut buf).await.is_err() {
+                break;
             }
 
-            let service_name = parts[0];
-            let method_name = parts[1];
-            let services_guard = services.read().await;
-
-            if let Some(service) = services_guard.get(service_name) {
-                let mut complete_data = Vec::with_capacity(64 * 1024);
-                let mut buf = Vec::with_capacity(8 * 1024);
-
-                loop {
-                    let mut len_buf = [0u8; 4];
-                    stream.read_exact(&mut len_buf).await?;
-                    let len = u32::from_be_bytes(len_buf) as usize;
-                    buf.resize(len, 0);
-                    stream.read_exact(&mut buf).await?;
-
-                    let frame: rpc::StreamFrame = bincode::decode_from_slice(&buf, standard()).map(|(data, _)| data)?;
-
-                    buf.clear();
-                    match frame {
-                        rpc::StreamFrame::Data(msg) => {
-                            complete_data.extend_from_slice(&msg.data);
-                            if msg.is_end {
-                                break;
-                            }
-                        }
-                        rpc::StreamFrame::Error(err) => {
-                            let error_frame = rpc::StreamFrame::Error(rpc::StreamError{
-                                id: req.id,
-                                error: err.error
-                            });
-                            send_frame(&mut stream, error_frame).await?;
-                            return Ok(());
-                        }
-                        _ => break,
-                    }
-                }
-
-                let complete_request = rpc::StreamRequest {
-                    id: req.id.clone(),
-                    method: req.method.clone(),
-                    data: Arc::from(complete_data),
-                };
-
-                match service.handle_stream_iter(method_name, rpc::StreamRequest{
-                    id: complete_request.id.clone(),
-                    method: complete_request.method.clone(),
-                    data: complete_request.data.clone(),
-                }).await {
-                    Ok(Some(mut rx)) => {
-                        let mut prev: Option<Vec<u8>> = None;
-                        while let Some(item) = rx.recv().await {
-                            if let Some(buf) = prev.take() {
-                                let frame = rpc::StreamFrame::Data(rpc::StreamMessage{
-                                    id: complete_request.id.clone(),
-                                    data: Cow::Borrowed(&buf),
-                                    is_end: false,
-                                });
-                                send_frame(&mut stream, frame).await?;
-                            }
-                            prev = Some(item);
-                        }
-                        if let Some(buf) = prev.take() {
-                            let frame = rpc::StreamFrame::Data(rpc::StreamMessage{
-                                id: complete_request.id.clone(),
-                                data: Cow::Borrowed(&buf),
-                                is_end: true,
-                            });
-                            send_frame(&mut stream, frame).await?;
-                        }
-
-                        let close_frame = rpc::StreamFrame::Close(complete_request.id.clone());
-                        send_frame(&mut stream, close_frame).await?;
-                    }
-                    _ => {
-                        match service.handle_stream(method_name, complete_request).await {
-                            Ok(stream_response) => {
-                                let chunk_size = 16 * 1024 * 1024; // 16M
-                                let total_chunks = (stream_response.data.len() + chunk_size - 1) / chunk_size;
-
-                                for index in 0..total_chunks {
-                                    let start = index * chunk_size;
-                                    let end = std::cmp::min(start + chunk_size, stream_response.data.len());
-                                    let chunk = &stream_response.data[start..end];
-                                    let is_last = index == total_chunks - 1;
-
-                                    let mut stream_message = rpc::StreamMessage {
-                                        id: stream_response.id.clone(),
-                                        data: Cow::Borrowed(chunk),
-                                        is_end: false,
-                                    };
-
-                                    if is_last {
-                                        stream_message.is_end = true
-                                    }
-
-
-                                    let frame = rpc::StreamFrame::Data(stream_message);
-                                    send_frame(&mut stream, frame).await?;
-                                }
-                                let close_frame = rpc::StreamFrame::Close(stream_response.id.clone());
-                                send_frame(&mut stream, close_frame).await?;
-                            }
-                            Err(error) => {
-                                let error_frame = rpc::StreamFrame::Error(rpc::StreamError{
-                                    id: req.id.clone(),
-                                    error
-                                });
-                                send_frame(&mut stream, error_frame).await?;
-
-                                let close_frame = rpc::StreamFrame::Close(req.id.clone());
-                                send_frame(&mut stream, close_frame).await?;
-                            }
-                        }
-                    }
+            if let Ok((frame, _)) = bincode::decode_from_slice::<rpc::StreamFrame, _>(&buf, standard()) {
+                if frame_tx_clone.send(frame).await.is_err() {
+                    break;
                 }
             } else {
-                let error_frame = rpc::StreamFrame::Error(rpc::StreamError{
-                    id: req.id,
-                    error: format!("Service {} not found", service_name)
-                });
-                send_frame(&mut stream, error_frame).await?;
+                break;
             }
         }
-        _ => {}
+    });
+
+    struct RequestState {
+        data_tx: mpsc::Sender<Vec<u8>>,
+    }
+    let mut pending_requests: HashMap<String, RequestState> = HashMap::new();
+
+    while let Some(frame) = frame_rx.recv().await {
+        match frame {
+            rpc::StreamFrame::Cancel(id) => {
+                pending_requests.remove(&id);
+
+                if let Some(flag) = cancel_flags.read().await.get(&id) {
+                    flag.store(true, Ordering::Relaxed);
+                }
+            }
+            rpc::StreamFrame::Request(req) => {
+                let request_id = req.id.clone();
+                let request_method = req.method.clone();
+
+                let parts: Vec<&str> = request_method.split('.').collect();
+                if parts.len() != 2 {
+                    let error_frame = rpc::StreamFrame::Error(rpc::StreamError{
+                        id: request_id.clone(),
+                        error: "Invalid method format".to_string()
+                    });
+                    let _ = send_frame(&writer, error_frame).await;
+                    continue;
+                }
+
+                let service_name = parts[0].to_string();
+                let method_name = parts[1].to_string();
+
+                // create data channel
+                let (data_tx, mut data_rx) = mpsc::channel::<Vec<u8>>(16);
+
+                pending_requests.insert(request_id.clone(), RequestState {
+                    data_tx,
+                });
+
+                let services_clone = services.clone();
+                let writer_clone = writer.clone();
+                let cancel_flags_clone = cancel_flags.clone();
+                let request_id_clone = request_id.clone();
+
+                tokio::spawn(async move {
+                    let mut complete_data = Vec::with_capacity(64 * 1024);
+                    while let Some(chunk) = data_rx.recv().await {
+                        complete_data.extend_from_slice(&chunk);
+                    }
+                    let services_guard = services_clone.read().await;
+                    if let Some(service) = services_guard.get(&service_name) {
+                        let complete_request = rpc::StreamRequest {
+                            id: request_id_clone.clone(),
+                            method: request_method.clone(),
+                            data: Arc::from(complete_data),
+                        };
+
+                        match service.handle_stream_iter(&method_name, complete_request.clone()).await {
+                            Ok(Some(mut rx)) => {
+                                let cancel_flag = Arc::new(AtomicBool::new(false));
+                                cancel_flags_clone.write().await.insert(request_id_clone.clone(), cancel_flag.clone());
+
+                                while let Some(item) = rx.recv().await {
+                                    // check cancel
+                                    if cancel_flag.load(Ordering::Relaxed) {
+                                        drop(rx);
+                                        let close_frame = rpc::StreamFrame::Close(request_id_clone.clone());
+                                        let _ = send_frame(&writer_clone, close_frame).await;
+                                        cancel_flags_clone.write().await.remove(&request_id_clone);
+                                        break;
+                                    }
+
+                                    let frame = rpc::StreamFrame::Data(rpc::StreamMessage {
+                                        id: request_id_clone.clone(),
+                                        data: Cow::Borrowed(&item),
+                                        is_end: false,
+                                        });
+                                    if send_frame(&writer_clone, frame).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                if !cancel_flag.load(Ordering::Relaxed) {
+                                    let close_frame = rpc::StreamFrame::Close(request_id_clone.clone());
+                                    let _ = send_frame(&writer_clone, close_frame).await;
+                                    cancel_flags_clone.write().await.remove(&request_id_clone);
+                                }
+                            }
+                            _ => {
+                                match service.handle_stream(&method_name, complete_request).await {
+                                    Ok(stream_response) => {
+                                        let chunk_size = 16 * 1024 * 1024;
+                                        let total_chunks = (stream_response.data.len() + chunk_size - 1) / chunk_size;
+
+                                        for index in 0..total_chunks {
+                                            let start = index * chunk_size;
+                                            let end = std::cmp::min(start + chunk_size, stream_response.data.len());
+                                            let chunk = &stream_response.data[start..end];
+                                            let is_last = index == total_chunks - 1;
+
+                                            let stream_message = rpc::StreamMessage {
+                                                id: stream_response.id.clone(),
+                                                data: Cow::Borrowed(chunk),
+                                                is_end: is_last,
+                                            };
+
+                                            let frame = rpc::StreamFrame::Data(stream_message);
+                                            if send_frame(&writer_clone, frame).await.is_err() {
+                                                break;
+                                            }
+                                        }
+
+                                        let close_frame = rpc::StreamFrame::Close(stream_response.id.clone());
+                                        let _ = send_frame(&writer_clone, close_frame).await;
+                                    }
+                                    Err(error) => {
+                                        let error_frame = rpc::StreamFrame::Error(rpc::StreamError {
+                                            id: request_id_clone.clone(),
+                                            error
+                                        });
+                                        let _ = send_frame(&writer_clone, error_frame).await;
+                                        let close_frame = rpc::StreamFrame::Close(request_id_clone.clone());
+                                        let _ = send_frame(&writer_clone, close_frame).await;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        let error_frame = rpc::StreamFrame::Error(rpc::StreamError{
+                            id: request_id_clone.clone(),
+                            error: format!("Service {} not found", service_name)
+                        });
+                        let _ = send_frame(&writer_clone, error_frame).await;
+                    }
+                });
+            }
+            rpc::StreamFrame::Data(msg) => {
+                if let Some(state) = pending_requests.get(&msg.id) {
+                    let _ = state.data_tx.send(msg.data.to_vec()).await;
+
+                    // end close
+                    if msg.is_end {
+                        pending_requests.remove(&msg.id);
+                    }
+                }
+            }
+            rpc::StreamFrame::Error(err) => {
+                tracing::error!("Received error frame: {:?}", err);
+                pending_requests.remove(&err.id);
+            }
+            _ => break,
+        }
     }
     Ok(())
 }
 
-async fn send_frame<'a>(stream: &mut Stream, frame: rpc::StreamFrame<'a>) -> Result<()> {
+async fn send_frame<'a>(writer: &Arc<Mutex<WriteHalf<Stream>>>, frame: rpc::StreamFrame<'a>) -> Result<()> {
     let data = bincode::encode_to_vec(&frame, standard())?;
     let len = data.len() as u32;
 
-    stream.write_all(&len.to_be_bytes()).await?;
-    stream.write_all(&data).await?;
-    stream.flush().await?;
+    let mut w = writer.lock().await;
+    w.write_all(&len.to_be_bytes()).await?;
+    w.write_all(&data).await?;
+    w.flush().await?;
     Ok(())
 }
 

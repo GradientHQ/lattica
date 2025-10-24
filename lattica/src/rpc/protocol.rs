@@ -76,6 +76,7 @@ pub enum StreamFrame<'a> {
     Data(StreamMessage<'a>),
     Error(StreamError),
     Close(String),
+    Cancel(String),
 }
 
 impl fmt::Display for RpcError {

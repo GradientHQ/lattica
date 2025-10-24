@@ -22,6 +22,7 @@ pub struct LatticaSDK {
 }
 
 #[pyclass]
+#[derive(Clone)]
 pub struct RpcClient {
     peer_id: String,
     lattica: Arc<network::Lattica>,
@@ -145,7 +146,9 @@ impl LFuture {
 #[pyclass]
 pub struct StreamIter {
     rx: Arc<Mutex<Option<mpsc::Receiver<Vec<u8>>>>>,
-    runtime: Arc<Runtime>
+    runtime: Arc<Runtime>,
+    request_id: String,
+    client: PyObject,
 }
 
 #[pymethods]
@@ -185,6 +188,23 @@ impl StreamIter {
                 }
             })?;
             Ok(fut.unbind())
+        })
+    }
+
+    fn cancel(&self) -> PyResult<()> {
+        Python::with_gil(|py| {
+            let client: &Bound<PyAny> = self.client.bind(py);
+            client.call_method1("cancel_stream_iter", (self.request_id.clone(),))
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to call cancel: {:?}", e)))?;
+
+            // clean
+            py.allow_threads(||{
+                self.runtime.block_on(async {
+                    *self.rx.lock().await = None;
+                })
+            });
+
+            Ok(())
         })
     }
 }
@@ -562,14 +582,40 @@ impl RpcClient {
         let method = method.to_string();
         let data = data.to_vec();
 
-        let rx = runtime.block_on(async move {
-            lattica.call_stream_iter(peer_id, method, data).await
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to call stream iter: {:?}", e)))
+        let (request_id, rx) = Python::with_gil(|py| {
+            py.allow_threads(|| {
+                runtime.block_on(async move {
+                    lattica.call_stream_iter(peer_id, method, data).await
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to call stream iter: {:?}", e)))
+                })
+            })
+        })?;
+
+        let client = Python::with_gil(|py| -> PyResult<Py<PyAny>> {
+            Ok(self.clone().into_pyobject(py)?.into_any().unbind())
         })?;
 
         Ok(StreamIter {
             rx: Arc::new(Mutex::new(Some(rx))),
             runtime: self.runtime.clone(),
+            request_id: request_id,
+            client: client,
+        })
+    }
+
+    fn cancel_stream_iter(&self, request_id: &str) -> PyResult<()> {
+        let lattica_clone = self.lattica.clone();
+        let peer_id: PeerId = self.peer_id.parse()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid peer ID: {:?}", e)))?;
+        let req_id = request_id.to_string();
+
+        Python::with_gil(|py| {
+            py.allow_threads(|| {
+                self.runtime.block_on(async move {
+                    lattica_clone.cancel_stream_iter(peer_id, req_id).await
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to cancel stream: {:?}", e)))
+                })
+            })
         })
     }
 }
@@ -599,7 +645,7 @@ impl rpc::RpcService for PythonRpcService {
         })
     }
 
-    async fn handle_request(&self, method: &str, request: rpc::RpcRequest) -> rpc::RpcResult<rpc::RpcResponse> {
+    async fn handle_request(&self, method: &str, request: rpc::RpcRequest) -> RpcResult<rpc::RpcResponse> {
         let method_name = format!("_handle_{}", method);
         let instance_ptr = Python::with_gil(|_py| {
             self.instance.clone()
@@ -636,7 +682,7 @@ impl rpc::RpcService for PythonRpcService {
         }
     }
 
-    async fn handle_stream(&self, method: &str, request: rpc::StreamRequest) -> rpc::RpcResult<rpc::StreamResponse> {
+    async fn handle_stream(&self, method: &str, request: StreamRequest) -> RpcResult<rpc::StreamResponse> {
         let method_name = format!("_handle_stream_{}", method);
 
         let instance_ptr = Python::with_gil(|_py| {
@@ -703,16 +749,18 @@ impl rpc::RpcService for PythonRpcService {
                     for item in iter {
                         match item {
                             Ok(obj) => {
-                                if let Ok(b) = obj.extract::<Vec<u8>>() {
-                                    let _ = tx.blocking_send(b);
+                                let send_result = if let Ok(b) = obj.extract::<Vec<u8>>() {
+                                    tx.blocking_send(b)
                                 } else if let Ok(b2) = obj.extract::<&[u8]>() {
-                                    let _ = tx.blocking_send(b2.to_vec());
+                                    tx.blocking_send(b2.to_vec())
+                                } else if let Ok(s) = obj.extract::<String>() {
+                                    tx.blocking_send(s.into_bytes())
                                 } else {
-                                    if let Ok(s) = obj.extract::<String>() {
-                                        let _ = tx.blocking_send(s.into_bytes());
-                                    } else {
-                                        continue
-                                    }
+                                    continue;
+                                };
+
+                                if send_result.is_err() {
+                                    break;
                                 }
                             }
                             Err(_) => break,
