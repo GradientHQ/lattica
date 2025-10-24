@@ -883,6 +883,7 @@ async fn swarm_poll(
     }
 
     let mut queries = FnvHashMap::<QueryId, QueryChannel>::default();
+    let pending_relay_addrs = Arc::new(RwLock::new(Vec::<Multiaddr>::new()));
     let mut cmd_rx = ReceiverStream::new(cmd_rx);
 
     loop {
@@ -905,24 +906,26 @@ async fn swarm_poll(
                     let remote_protocol = common::get_transport_protocol(remote_addr);
                     let is_direct = !endpoint.get_remote_address().to_string().contains("p2p-circuit");
 
-                    tracing::info!("Connection established with peer: {}, via: {}, use: {:?}, is_direct: {}", peer_id, remote_addr, remote_protocol, is_direct);
-                    
-                    // update address book
-                    let mut address_book_guard = address_book.write().await;
-                    let source = if endpoint.is_dialer() {
-                        AddressSource::Dial
-                    } else {
-                        AddressSource::Incoming
-                    };
-                    address_book_guard.add_address(&peer_id, remote_addr.clone(), source, endpoint.is_relayed(), connection_id);
-                    address_book_guard.set_last_seen(&peer_id, Utc::now());
+                    if !remote_protocol.is_none() {
+                        tracing::info!("Connection established with peer: {}, via: {}, use: {:?}, is_direct: {}", peer_id, remote_addr, remote_protocol, is_direct);
 
-                    // check nat travel success, remove relayed address
-                    if !endpoint.is_relayed() {
-                        if let Some(info) = address_book_guard.info(&peer_id) {
-                            for (_, _, _, relayed, cid) in info.addresses() {
-                                if relayed {
-                                    swarm.close_connection(cid);
+                        // update address book
+                        let mut address_book_guard = address_book.write().await;
+                        let source = if endpoint.is_dialer() {
+                            AddressSource::Dial
+                        } else {
+                            AddressSource::Incoming
+                        };
+                        address_book_guard.add_address(&peer_id, remote_addr.clone(), source, endpoint.is_relayed(), connection_id);
+                        address_book_guard.set_last_seen(&peer_id, Utc::now());
+
+                        // check nat travel success, remove relayed address
+                        if !endpoint.is_relayed() {
+                            if let Some(info) = address_book_guard.info(&peer_id) {
+                                for (_, _, _, relayed, cid) in info.addresses() {
+                                    if relayed {
+                                        swarm.close_connection(cid);
+                                    }
                                 }
                             }
                         }
@@ -941,7 +944,7 @@ async fn swarm_poll(
                             handle_identity_event(&config, identify_event, &mut swarm, &mut address_book_guard).await;
                         }
                         LatticaBehaviourEvent::Relay(relay_event) => {
-                            handle_relay_event(&config, &mut swarm, relay_event).await;
+                            handle_relay_event(&config, &mut swarm, relay_event, &pending_relay_addrs).await;
                         }
                         LatticaBehaviourEvent::Dcutr(dcutr_event) => {
                             tracing::debug!("Dcutr event: {:?}", dcutr_event);
@@ -1005,7 +1008,7 @@ async fn swarm_poll(
                         }
                         LatticaBehaviourEvent::Gossipsub(gossipsub_event) => {
                             tracing::debug!("gossipsub event {:?}", gossipsub_event);
-                            handle_gossipsub_event(gossipsub_event, &mut swarm).await;
+                            handle_gossipsub_event(gossipsub_event, &mut swarm, &pending_relay_addrs).await;
                         }
                         LatticaBehaviourEvent::Bitswap(bitswap_event) => {
                             tracing::info!("bitswap event {:?}", bitswap_event);
