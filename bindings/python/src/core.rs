@@ -198,8 +198,10 @@ impl StreamIter {
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to call cancel: {:?}", e)))?;
 
             // clean
-            self.runtime.block_on(async {
-                *self.rx.lock().await = None;
+            py.allow_threads(||{
+                self.runtime.block_on(async {
+                    *self.rx.lock().await = None;
+                })
             });
 
             Ok(())
@@ -580,9 +582,13 @@ impl RpcClient {
         let method = method.to_string();
         let data = data.to_vec();
 
-        let (request_id, rx) = runtime.block_on(async move {
-            lattica.call_stream_iter(peer_id, method, data).await
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to call stream iter: {:?}", e)))
+        let (request_id, rx) = Python::with_gil(|py| {
+            py.allow_threads(|| {
+                runtime.block_on(async move {
+                    lattica.call_stream_iter(peer_id, method, data).await
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to call stream iter: {:?}", e)))
+                })
+            })
         })?;
 
         let client = Python::with_gil(|py| -> PyResult<Py<PyAny>> {
@@ -603,9 +609,13 @@ impl RpcClient {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid peer ID: {:?}", e)))?;
         let req_id = request_id.to_string();
 
-        self.runtime.block_on(async move {
-            lattica_clone.cancel_stream_iter(peer_id, req_id).await
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to cancel stream: {:?}", e)))
+        Python::with_gil(|py| {
+            py.allow_threads(|| {
+                self.runtime.block_on(async move {
+                    lattica_clone.cancel_stream_iter(peer_id, req_id).await
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to cancel stream: {:?}", e)))
+                })
+            })
         })
     }
 }
