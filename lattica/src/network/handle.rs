@@ -529,7 +529,7 @@ pub(crate) async fn handle_identity_event(
                     address_book.remove_peer(&peer_id);
                     match swarm.disconnect_peer_id(peer_id) {
                         Ok(()) => {
-                            tracing::info!("protocol version mismatch, disconnect from peer {}", peer_id);
+                            tracing::debug!("protocol version mismatch, disconnect from peer {}", peer_id);
                         },
                         Err(()) => {
                         }
@@ -551,7 +551,7 @@ pub(crate) async fn handle_identity_event(
     }
 }
 
-pub(crate) async fn handle_relay_event(config: &Config, swarm: &mut Swarm<LatticaBehaviour>, event: relay::client::Event) {
+pub(crate) async fn handle_relay_event(config: &Config, swarm: &mut Swarm<LatticaBehaviour>, event: relay::client::Event, pending_relay_addrs: &Arc<RwLock<Vec<Multiaddr>>>) {
     let local_peer_id = swarm.local_peer_id().clone();
     match event {
         relay::client::Event::ReservationReqAccepted {relay_peer_id,..} => {
@@ -563,7 +563,18 @@ pub(crate) async fn handle_relay_event(config: &Config, swarm: &mut Swarm<Lattic
 
                         // broadcast by gossipsub
                         let topic = gossipsub::IdentTopic::new(P2P_CIRCUIT_TOPIC);
-                        let _ = swarm.behaviour_mut().gossipsub.publish(topic, after_relay_addr.to_string().into_bytes());
+                        let ret = swarm.behaviour_mut().gossipsub.publish(topic, after_relay_addr.to_string().into_bytes());
+                        match ret {
+                            Ok(msgid) => {
+                                tracing::debug!("publish gossipsub message success: {:?}",msgid )
+                            },
+                            Err(gossipsub::PublishError::InsufficientPeers) => {
+                                pending_relay_addrs.write().await.push(after_relay_addr.clone());
+                            }
+                            Err(err) => {
+                                tracing::debug!("publish gossipsub message error: {:?}", err)
+                            }
+                        }
 
                         tracing::debug!("handle_relay_event add relay circuit address: {:?}", after_relay_addr);
                     }
@@ -574,11 +585,33 @@ pub(crate) async fn handle_relay_event(config: &Config, swarm: &mut Swarm<Lattic
     }
 }
 
-pub(crate) async fn handle_gossipsub_event(event: gossipsub::Event, swarm: &mut Swarm<LatticaBehaviour>) {
+pub(crate) async fn handle_gossipsub_event(event: gossipsub::Event, swarm: &mut Swarm<LatticaBehaviour>, pending_relay_addrs: &Arc<RwLock<Vec<Multiaddr>>>) {
     match event {
+        gossipsub::Event::Subscribed {topic,..} => {
+            if topic.as_str() == P2P_CIRCUIT_TOPIC {
+                let pending = pending_relay_addrs.read().await;
+                if !pending.is_empty() {
+                    tracing::debug!("Publishing {} cached relay addresses", pending.len());
+                    for addr in pending.iter() {
+                        let topic = gossipsub::IdentTopic::new(P2P_CIRCUIT_TOPIC);
+                        match swarm.behaviour_mut().gossipsub.publish(topic, addr.to_string().into_bytes()) {
+                            Ok(msgid) => {
+                                tracing::debug!("Published cached relay address: {}, msgid: {:?}", addr, msgid);
+                            },
+                            Err(err) => {
+                                tracing::error!("Failed to publish gossipsub message: {:?}", err);
+                            }
+                        }
+                    }
+                }
+
+                drop(pending);
+                pending_relay_addrs.write().await.clear();
+            }
+        }
         gossipsub::Event::Message {message,..} => {
             let topic = message.topic.as_str();
-            tracing::info!("Gossipsub received message from topic {:?}", topic);
+            tracing::debug!("Gossipsub received message from topic {:?}", topic);
             match topic {
                 P2P_CIRCUIT_TOPIC => {
                     if let Ok(addr_str) = std::str::from_utf8(&message.data) {
@@ -591,7 +624,7 @@ pub(crate) async fn handle_gossipsub_event(event: gossipsub::Event, swarm: &mut 
                                 if swarm.behaviour_mut().is_kad_enabled() {
                                     swarm.behaviour_mut().kad.as_mut().unwrap().add_address(&source_peer_id, addr.clone());
                                 }
-                                tracing::info!("Gossipsub message from {:?} to {:?}", source_peer_id, addr.clone());
+                                tracing::debug!("Gossipsub message from {:?} to {:?}", source_peer_id, addr.clone());
                             } else {
                                 tracing::error!("Gossipsub message from {:?} is not a Multiaddr {:?}", source_peer_id, addr_str);
                             }
