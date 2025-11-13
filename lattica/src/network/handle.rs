@@ -538,6 +538,7 @@ pub(crate) async fn handle_identity_event(
                 }
                 
                 address_book.set_info(&peer_id, info.clone());
+                address_book.set_protocol_check(&peer_id, true);
                 
                 for addr in info.listen_addrs {
                     // add other node address to kad

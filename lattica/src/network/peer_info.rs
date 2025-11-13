@@ -12,6 +12,7 @@ pub struct PeerInfo {
     pub(crate) listeners: Vec<Multiaddr>,
     pub(crate) addresses: FnvHashMap<Multiaddr, (AddressSource, DateTime<Utc>, bool, ConnectionId)>,
     pub(crate) last_seen: Option<String>,
+    pub(crate) protocol_check: bool,
     rtt: Option<Rtt>,
 }
 

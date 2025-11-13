@@ -355,7 +355,12 @@ impl StreamHandle {
                 if let Ok((frame, _)) = bincode::decode_from_slice::<rpc::StreamFrame, _>(&buf, standard()) {
                     match frame {
                         rpc::StreamFrame::Data(msg) => {
-                            if let Some(tx) = pending_stream_clone.read().await.get(&msg.id) {
+                                let tx_opt = {
+                                    let guard = pending_stream_clone.read().await;
+                                    guard.get(&msg.id).cloned()
+                                };
+
+                                if let Some(tx) = tx_opt {
                                 if tx.try_send(msg.data.to_vec()).is_err() {
                                     pending_stream_clone.write().await.remove(&msg.id);
                                 }
@@ -384,7 +389,6 @@ impl StreamHandle {
             }
 
             // connection close, clean
-            tracing::info!("Cleaning up pending calls for peer {}", peer_id);
             pending_stream_clone.write().await.clear();
             pending_unary_clone.write().await.clear();
         });
@@ -847,6 +851,20 @@ impl Lattica {
         let (tx, rx) = oneshot::channel();
         self.cmd.try_send(Command::StopProviding(record_key, tx))?;
         rx.await?
+    }
+
+    pub fn close(&self) -> Result<()> {
+        self._swarm_handle.abort();
+        Ok(())
+    }
+}
+
+impl Drop for Lattica {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self._swarm_handle) == 1 {
+            self._swarm_handle.abort();
+            tracing::warn!("Lattica core dropped");
+        }
     }
 }
 

@@ -506,6 +506,10 @@ impl LatticaSDK {
             Ok(())
         })
     }
+
+    fn close(&self) -> PyResult<()> {
+        self.lattica.close().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{:?}", e)))
+    }
 }
 
 #[pymethods]
