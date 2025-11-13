@@ -241,9 +241,28 @@ class Lattica:
         except Exception as e:
             raise RuntimeError(f"Failed to stop providing: {e}")
 
+    def close(self):
+        try:
+            self._lattica_instance.close()
+        except Exception as e:
+            raise RuntimeError(f"Failed to close client: {e}")
+
+    def is_symmetric_nat(self):
+        try:
+            return self._lattica_instance.is_symmetric_nat()
+        except Exception as e:
+            raise RuntimeError(f"Failed to check is_symmetric_nat error: {e}")
+
     def __enter__(self):
         self._ensure_initialized()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         pass
+
+    def __del__(self):
+        if self._lattica_instance is not None:
+            try:
+                self._lattica_instance.close()
+            except Exception as e:
+                print(f"Warning: Failed to shutdown Lattica: {e}")

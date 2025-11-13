@@ -49,6 +49,7 @@ pub struct Lattica {
     config: Arc<Config>,
     address_book: Arc<RwLock<AddressBook>>,
     storage: Arc<SledBlockstore>,
+    symmetric_nat: Arc<RwLock<Option<bool>>>
 }
 
 pub struct LatticaBuilder {
@@ -292,12 +293,17 @@ impl LatticaBuilder {
             )
         );
 
+        // nat type check
+        let symmetric_nat = Arc::new(RwLock::new(None));
+        common::check_symmetric_nat(symmetric_nat.clone())?;
+
         let lattica = Lattica{
             _swarm_handle: Arc::new(_swarm_handle),
             cmd: cmd_tx,
             config: Arc::new(self.config),
             address_book: address_book_arc,
             storage: storage_arc,
+            symmetric_nat,
         };
 
         Ok(lattica)
@@ -355,7 +361,12 @@ impl StreamHandle {
                 if let Ok((frame, _)) = bincode::decode_from_slice::<rpc::StreamFrame, _>(&buf, standard()) {
                     match frame {
                         rpc::StreamFrame::Data(msg) => {
-                            if let Some(tx) = pending_stream_clone.read().await.get(&msg.id) {
+                                let tx_opt = {
+                                    let guard = pending_stream_clone.read().await;
+                                    guard.get(&msg.id).cloned()
+                                };
+
+                                if let Some(tx) = tx_opt {
                                 if tx.try_send(msg.data.to_vec()).is_err() {
                                     pending_stream_clone.write().await.remove(&msg.id);
                                 }
@@ -384,7 +395,6 @@ impl StreamHandle {
             }
 
             // connection close, clean
-            tracing::info!("Cleaning up pending calls for peer {}", peer_id);
             pending_stream_clone.write().await.clear();
             pending_unary_clone.write().await.clear();
         });
@@ -847,6 +857,26 @@ impl Lattica {
         let (tx, rx) = oneshot::channel();
         self.cmd.try_send(Command::StopProviding(record_key, tx))?;
         rx.await?
+    }
+
+    pub fn close(&self) -> Result<()> {
+        self._swarm_handle.abort();
+        Ok(())
+    }
+
+    pub fn is_symmetric_nat(&self) -> Result<Option<bool>> {
+        let nat = self.symmetric_nat.try_read()
+            .map_err(|_| anyhow!("Failed to read symmetric_nat"))?;
+        Ok(*nat)
+    }
+}
+
+impl Drop for Lattica {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self._swarm_handle) == 1 {
+            self._swarm_handle.abort();
+            tracing::warn!("Lattica core dropped");
+        }
     }
 }
 

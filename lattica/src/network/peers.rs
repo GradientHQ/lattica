@@ -44,7 +44,7 @@ impl AddressBook {
             .iter()
             .filter_map(|(peer_id, info)| {
                 let has_direct = info.addresses().any(|(_, _, _, relayed, _)| !relayed);
-                if has_direct { Some(*peer_id) } else { None }
+                if has_direct && info.protocol_check { Some(*peer_id) } else { None }
             })
             .collect()
     }
@@ -84,5 +84,11 @@ impl AddressBook {
 
     pub fn remove_peer(&mut self, peer_id: &PeerId) {
         self.peers.remove(peer_id);
+    }
+
+    pub fn set_protocol_check(&mut self, peer_id: &PeerId, value: bool) {
+        if let Some(peer_info) = self.peers.get_mut(peer_id) {
+            peer_info.protocol_check = value;
+        }
     }
 }

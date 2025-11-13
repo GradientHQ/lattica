@@ -524,7 +524,8 @@ pub(crate) async fn handle_identity_event(
 ) {
     match event {
         identify::Event::Received {peer_id, info, ..} => {
-            if !common::is_relay_server(&config.relay_servers, peer_id) && !common::is_relay_server(&config.bootstrap_nodes, peer_id) {
+            if !common::is_relay_server(&config.relay_servers, peer_id)
+                && !info.protocol_version.contains("common"){
                 if config.protocol_version != info.protocol_version {
                     address_book.remove_peer(&peer_id);
                     match swarm.disconnect_peer_id(peer_id) {
@@ -538,6 +539,7 @@ pub(crate) async fn handle_identity_event(
                 }
                 
                 address_book.set_info(&peer_id, info.clone());
+                address_book.set_protocol_check(&peer_id, true);
                 
                 for addr in info.listen_addrs {
                     // add other node address to kad

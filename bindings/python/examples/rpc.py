@@ -105,6 +105,7 @@ async def run_client():
 
     try:
         stub = handler.get_stub(server_peer_id)
+        time.sleep(1)
 
         print("\n=== Testing Basic RPC ===")
         future = stub.add(10, 20)
@@ -127,8 +128,8 @@ async def run_client():
         print(f"Total transfer time: {transfer_time:.2f}s")
 
         print("\n=== Testing Stream iter RPC ===")
-        for text in stub.stream_rpc_iter():
-            print(f"recv: {text}")
+        # for text in stub.stream_rpc_iter():
+        #     print(f"recv: {text}")
 
     except Exception as e:
             print(f"Client error: {e}")
