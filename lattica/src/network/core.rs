@@ -49,6 +49,7 @@ pub struct Lattica {
     config: Arc<Config>,
     address_book: Arc<RwLock<AddressBook>>,
     storage: Arc<SledBlockstore>,
+    symmetric_nat: Arc<RwLock<Option<bool>>>
 }
 
 pub struct LatticaBuilder {
@@ -292,12 +293,17 @@ impl LatticaBuilder {
             )
         );
 
+        // nat type check
+        let symmetric_nat = Arc::new(RwLock::new(None));
+        common::check_symmetric_nat(symmetric_nat.clone())?;
+
         let lattica = Lattica{
             _swarm_handle: Arc::new(_swarm_handle),
             cmd: cmd_tx,
             config: Arc::new(self.config),
             address_book: address_book_arc,
             storage: storage_arc,
+            symmetric_nat,
         };
 
         Ok(lattica)
@@ -856,6 +862,12 @@ impl Lattica {
     pub fn close(&self) -> Result<()> {
         self._swarm_handle.abort();
         Ok(())
+    }
+
+    pub fn is_symmetric_nat(&self) -> Result<Option<bool>> {
+        let nat = self.symmetric_nat.try_read()
+            .map_err(|_| anyhow!("Failed to read symmetric_nat"))?;
+        Ok(*nat)
     }
 }
 

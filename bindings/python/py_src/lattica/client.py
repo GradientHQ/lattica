@@ -247,6 +247,12 @@ class Lattica:
         except Exception as e:
             raise RuntimeError(f"Failed to close client: {e}")
 
+    def is_symmetric_nat(self):
+        try:
+            return self._lattica_instance.is_symmetric_nat()
+        except Exception as e:
+            raise RuntimeError(f"Failed to check is_symmetric_nat error: {e}")
+
     def __enter__(self):
         self._ensure_initialized()
         return self

@@ -13,6 +13,7 @@ use cid::{Cid};
 use libp2p::kad::RecordKey;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
+use tracing_subscriber::EnvFilter;
 use lattica::rpc::{RpcResult, StreamRequest};
 
 #[pyclass]
@@ -214,7 +215,8 @@ impl LatticaSDK {
     #[new]
     #[pyo3(signature = (config_dict = None))]
     fn new(config_dict: Option<&Bound<PyAny>>) -> PyResult<Self> {
-        tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).try_init().ok();
+        tracing_subscriber::fmt().with_env_filter(EnvFilter::from_default_env())
+            .try_init().ok();
 
         let bootstrap_nodes = config_dict
             .and_then(|dict| dict.get_item("bootstrap_nodes").ok())
@@ -509,6 +511,10 @@ impl LatticaSDK {
 
     fn close(&self) -> PyResult<()> {
         self.lattica.close().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{:?}", e)))
+    }
+
+    fn is_symmetric_nat(&self) -> PyResult<Option<bool>> {
+        self.lattica.is_symmetric_nat().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{:?}", e)))
     }
 }
 
