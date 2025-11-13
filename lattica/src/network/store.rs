@@ -297,7 +297,7 @@ impl RecordStore for MultiStore {
 
     fn add_provider(&mut self, record: ProviderRecord) -> Result<(), Error> {
         if let Ok(mut memory_store) = self.memory_store.write() {
-            memory_store.add_provider(record);
+            let _ = memory_store.add_provider(record);
         }
 
         Ok(())
