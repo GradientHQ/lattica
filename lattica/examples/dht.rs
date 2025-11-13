@@ -1,6 +1,5 @@
 use lattica::{network, common};
-use std::time::{Duration, Instant};
-use libp2p::kad::{Quorum, Record, RecordKey};
+use std::time::{Duration};
 use tokio::signal;
 use std::env;
 use libp2p::Multiaddr;
@@ -26,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         vec![]
     };
 
-    let mut lattica = network::Lattica::builder()
+    let lattica = network::Lattica::builder()
         .with_bootstrap_nodes(bootstrap_nodes.clone())
         .build().await?;
 
