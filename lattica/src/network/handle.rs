@@ -294,7 +294,7 @@ pub(crate) async fn handle_kad_event(event: Event, queries: &mut FnvHashMap<Quer
                 }
                 QueryResult::PutRecord(Err(err)) => {
                     let err_str = format!("{:?}", err);
-                    if err_str.contains("QuorumFailed") || err_str.contains("NoKnownPeers") {
+                    if err_str.contains("QuorumFailed") || err_str.contains("NoKnownPeers") || err_str.contains("Timeout"){
                         if let Some(QueryChannel::PutRecord(ch)) = queries.remove(&id.into()) {
                             ch.send(Ok(())).ok();
                         }

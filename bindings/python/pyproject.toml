@@ -4,16 +4,16 @@ build-backend = "maturin"
 
 [project]
 name = "lattica"
-version = "1.0.11"
+version = "1.0.12"
 description = "A unified Python SDK for P2P networking with integrated DHT and NAT capabilities"
 readme = "README.md"
 license = {text = "MIT"}
 keywords = ["p2p", "networking", "dht", "nat", "libp2p", "distributed"]
-requires-python = ">=3.11"
+requires-python = ">=3.8"
 dependencies = [
-    "asyncio; python_version >= '3.11'",
-    "typing-extensions; python_version < '3.12'",
-    "nest_asyncio; python_version >= '3.11'"
+    "asyncio; python_version >= '3.8'",
+    "typing-extensions; python_version < '3.8'",
+    "nest_asyncio; python_version >= '3.8'"
 ]
 
 [project.optional-dependencies]
@@ -40,7 +40,7 @@ bench = [
 
 [tool.maturin]
 bindings = "pyo3-abi3"
-features = ["pyo3/extension-module", "pyo3/abi3-py311"]
+features = ["pyo3/extension-module", "pyo3/abi3-py38"]
 module-name = "lattica_python_core"
 python-source = "py_src"
 python-packages = ["lattica"]
@@ -50,7 +50,7 @@ python-packages = ["lattica"]
 
 [tool.black]
 line-length = 88
-target-version = ['py311']
+target-version = ['py38']
 include = '\.pyi?$'
 extend-exclude = '''
 /(
@@ -73,7 +73,7 @@ line_length = 88
 known_first_party = ["lattica"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.8"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
