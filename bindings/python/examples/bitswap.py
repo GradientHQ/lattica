@@ -23,8 +23,14 @@ def main():
             peer_list = lattica.get_providers(request_cid)
             print(f"peer list: {peer_list}")
 
-            data = lattica.get_block(request_cid)
-            print(f"data: {data}")
+            try:
+                # Use default timeout (10 seconds)
+                # You can also specify a custom timeout: lattica.get_block(request_cid, timeout_secs=30)
+                data = lattica.get_block(request_cid)
+                print(f"data: {data}")
+            except Exception as e:
+                print(f"Failed to get block: {e}")
+                print("This may happen if the CID doesn't exist or the request timed out.")
 
         else:
             # put block
@@ -37,6 +43,7 @@ def main():
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
+        print("KeyboardInterrupt")
         pass
     except Exception as e:
         print(e)

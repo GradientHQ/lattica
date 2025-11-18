@@ -459,13 +459,25 @@ impl LatticaSDK {
         })
     }
 
-    fn get_block(&self, cid_str: &str) -> PyResult<Vec<u8>> {
+    #[pyo3(signature = (cid_str, *, timeout_secs = 10))]
+    fn get_block(&self, cid_str: &str, timeout_secs: u64) -> PyResult<Vec<u8>> {
         self.runtime.block_on(async move {
             let cid = Cid::try_from(cid_str)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid CID: {:?}", e)))?;
-            let bc = self.lattica.get_block(&cid).await?;
-            Ok(bc.0)
+            // Add timeout to prevent hanging when CID doesn't exist
+            match tokio::time::timeout(Duration::from_secs(timeout_secs), self.lattica.get_block(&cid)).await {
+                Ok(result) => {
+                    let bc = result?;
+                    Ok(bc.0)
+                }
+                Err(_) => {
+                    Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        format!("get_block timeout: block not found or request timed out after {} seconds", timeout_secs)
+                    ))
+                }
+            }
         })
+
     }
 
     fn put_block(&self, data: Vec<u8>) -> PyResult<String> {
