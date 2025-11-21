@@ -36,7 +36,8 @@ pub enum Command{
     RendezvousRegister(PeerId, Option<String>, Option<u64>, oneshot::Sender<Result<()>>),
     RendezvousDiscover(PeerId, Option<String>, Option<u64>, oneshot::Sender<Result<Vec<PeerId>>>),
     GetVisibleMAddrs(oneshot::Sender<Result<Vec<Multiaddr>>>),
-    Get(Cid, oneshot::Sender<Result<BytesBlock>>),
+    Get(Cid, oneshot::Sender<Result<BytesBlock>>, oneshot::Sender<Option<QueryId>>),
+    CancelGet(QueryId),
     StartProviding(RecordKey, oneshot::Sender<Result<()>>),
     GetProviders(RecordKey, oneshot::Sender<Result<Vec<PeerId>>>),
     StopProviding(RecordKey, oneshot::Sender<Result<()>>),
@@ -824,10 +825,30 @@ impl Lattica {
         address_book.info(peer_id)?.rtt()
     }
 
-    pub async fn get_block(&self, cid: &Cid) -> Result<BytesBlock> {
+    pub async fn get_block(&self, cid: &Cid, timeout: Duration) -> Result<BytesBlock> {
         let (tx, rx) = oneshot::channel();
-        self.cmd.try_send(Command::Get(*cid, tx))?;
-        rx.await?
+        let (query_id_tx, query_id_rx) = oneshot::channel();
+        self.cmd.try_send(Command::Get(*cid, tx, query_id_tx))?;
+        let query_id = query_id_rx.await.ok().flatten();
+
+        // Wait for the result with timeout
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => {
+                // Receiver was dropped, cancel the query
+                if let Some(qid) = query_id {
+                    let _ = self.cmd.try_send(Command::CancelGet(qid));
+                }
+                Err(anyhow!("Receiver channel closed"))
+            }
+            Err(_) => {
+                // Timeout occurred, cancel the query
+                if let Some(qid) = query_id {
+                    let _ = self.cmd.try_send(Command::CancelGet(qid));
+                }
+                Err(anyhow!("get_block timeout: block not found or request timed out after {:?}", timeout))
+            }
+        }
     }
 
     pub async fn put_block(&self, block: &BytesBlock) -> Result<Cid> {
@@ -1129,8 +1150,16 @@ async fn swarm_poll(
                         .collect::<Vec<Multiaddr>>();
                     let _ = tx.send(Ok(result));
                 }
-                Command::Get(cid, tx) => {
-                    swarm.behaviour_mut().get(cid, &mut queries, tx);
+                Command::Get(cid, tx, query_id_tx) => {
+                    // get() returns Option<QueryId>, send it back so caller can cancel if needed
+                    let query_id = swarm.behaviour_mut().get(cid, &mut queries, tx);
+                    let _ = query_id_tx.send(query_id);
+                }
+                Command::CancelGet(query_id) => {
+                    if let Some(QueryChannel::Get(ch)) = queries.remove(&query_id) {
+                        // Send error to indicate cancellation, then drop the channel
+                        let _ = ch.send(Err(anyhow!("Query cancelled")));
+                    }
                 }
                 Command::StartProviding(key, tx) => {
                     swarm.behaviour_mut().start_providing(key, tx, &mut queries);

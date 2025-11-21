@@ -459,12 +459,22 @@ impl LatticaSDK {
         })
     }
 
-    fn get_block(&self, cid_str: &str) -> PyResult<Vec<u8>> {
-        self.runtime.block_on(async move {
-            let cid = Cid::try_from(cid_str)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid CID: {:?}", e)))?;
-            let bc = self.lattica.get_block(&cid).await?;
-            Ok(bc.0)
+    #[pyo3(signature = (cid_str, *, timeout_secs = 10))]
+    fn get_block(&self, cid_str: &str, timeout_secs: u64) -> PyResult<Vec<u8>> {
+        let lattica = self.lattica.clone();
+        Python::with_gil(|py| {
+            py.allow_threads(|| {
+                self.runtime.block_on(async move {
+                    let cid = Cid::try_from(cid_str)
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid CID: {:?}", e)))?;
+                    // Use get_block which handles timeout and cancellation internally
+                    let bc = lattica.get_block(&cid, Duration::from_secs(timeout_secs)).await
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                            format!("get_block failed: {}", e)
+                        ))?;
+                    Ok(bc.0)
+                })
+            })
         })
     }
 

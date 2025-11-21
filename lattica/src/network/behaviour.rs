@@ -227,12 +227,15 @@ impl LatticaBehaviour{
         }
     }
 
-    pub fn get(&mut self, cid: Cid, queries: &mut FnvHashMap<QueryId, QueryChannel>, tx: oneshot::Sender<Result<BytesBlock>>){
+    pub fn get(&mut self, cid: Cid, queries: &mut FnvHashMap<QueryId, QueryChannel>, tx: oneshot::Sender<Result<BytesBlock>>) -> Option<QueryId> {
         if let Some(bitswap) = self.bitswap.as_mut() {
             let id = bitswap.get(&cid);
-            queries.insert(id.into(), QueryChannel::Get(tx));
+            let query_id = id.into();
+            queries.insert(query_id, QueryChannel::Get(tx));
+            Some(query_id)
         } else {
-            tx.send(Err(anyhow!("Kad is not enabled"))).ok();
+            tx.send(Err(anyhow!("Bitswap is not enabled"))).ok();
+            None
         }
     }
 
