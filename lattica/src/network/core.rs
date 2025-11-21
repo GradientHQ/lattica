@@ -825,18 +825,12 @@ impl Lattica {
         address_book.info(peer_id)?.rtt()
     }
 
-    pub async fn get_block(&self, cid: &Cid) -> Result<BytesBlock> {
-        // Use a very long timeout (100 years) for backward compatibility
-        // This effectively means no timeout for existing code
-        self.get_block_with_timeout(cid, Duration::from_secs(100 * 365 * 24 * 60 * 60)).await
-    }
-
-    pub async fn get_block_with_timeout(&self, cid: &Cid, timeout: Duration) -> Result<BytesBlock> {
+    pub async fn get_block(&self, cid: &Cid, timeout: Duration) -> Result<BytesBlock> {
         let (tx, rx) = oneshot::channel();
         let (query_id_tx, query_id_rx) = oneshot::channel();
         self.cmd.try_send(Command::Get(*cid, tx, query_id_tx))?;
         let query_id = query_id_rx.await.ok().flatten();
-        
+
         // Wait for the result with timeout
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(result)) => result,

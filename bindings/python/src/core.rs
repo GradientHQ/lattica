@@ -467,8 +467,8 @@ impl LatticaSDK {
                 self.runtime.block_on(async move {
                     let cid = Cid::try_from(cid_str)
                         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid CID: {:?}", e)))?;
-                    // Use get_block_with_timeout which handles timeout and cancellation internally
-                    let bc = lattica.get_block_with_timeout(&cid, Duration::from_secs(timeout_secs)).await
+                    // Use get_block which handles timeout and cancellation internally
+                    let bc = lattica.get_block(&cid, Duration::from_secs(timeout_secs)).await
                         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                             format!("get_block failed: {}", e)
                         ))?;

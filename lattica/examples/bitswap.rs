@@ -3,6 +3,7 @@ use libp2p::kad::{RecordKey};
 use tokio::signal;
 use std::env;
 use std::error::Error;
+use std::time::Duration;
 use blockstore::block::Block;
 use cid::Cid;
 use libp2p::Multiaddr;
@@ -45,7 +46,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         // get block
         let cid = Cid::try_from(cid_arg)?;
-        let data_block = lattica.get_block(&cid).await?;
+        let data_block = lattica.get_block(&cid, Duration::from_secs(10)).await?;
         let data = data_block.data();
         tracing::info!("get block,data: {:?}", str::from_utf8(&data)?);
 
