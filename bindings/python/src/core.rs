@@ -160,13 +160,17 @@ impl StreamIter {
 
     fn __next__(&self) -> Option<Vec<u8>> {
         // None => StopIteration
-        self.runtime.block_on(async {
-            let mut guard = self.rx.lock().await;
-            if let Some(rx) = guard.as_mut() {
-                rx.recv().await
-            } else {
-                None
-            }
+        Python::with_gil(|py| {
+            py.allow_threads(||{
+                self.runtime.block_on(async {
+                    let mut guard = self.rx.lock().await;
+                    if let Some(rx) = guard.as_mut() {
+                        rx.recv().await
+                    } else {
+                        None
+                    }
+                })
+            })
         })
     }
 
