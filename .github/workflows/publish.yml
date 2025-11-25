@@ -12,64 +12,67 @@ jobs:
     strategy:
       matrix:
         include:
+          # Linux
           - os: ubuntu-latest
             runs-on: ubuntu-latest
-            arch: x86_64
-          - os: ubuntu-24.04-arm
-            runs-on: ubuntu-24.04-arm
-            arch: aarch64
+            target: x86_64
+            platform: linux
+          - os: ubuntu-latest
+            runs-on: ubuntu-latest
+            target: aarch64
+            platform: linux
+          # macOS
           - os: macos-14
             runs-on: macos-14
-            arch: arm64
+            target: aarch64
+            platform: macos
           - os: macos-13
             runs-on: macos-13
-            arch: x86_64
+            target: x86_64
+            platform: macos
+          # Windows
           - os: windows-latest
             runs-on: windows-latest
-            arch: x86_64
+            target: x64
+            platform: windows
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - name: Build wheels (Linux)
+        if: matrix.platform == 'linux'
+        uses: PyO3/maturin-action@v1
         with:
-          python-version: "3.8"
+          target: ${{ matrix.target }}
+          args: --release --out dist --find-interpreter
+          sccache: 'true'
+          manylinux: auto
+          working-directory: bindings/python
 
-      - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Build wheels (macOS)
+        if: matrix.platform == 'macos'
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --strip
+          sccache: 'true'
+          working-directory: bindings/python
 
-      - name: Install maturin
-        run: pip install maturin
+      - name: Build wheels (Windows)
+        if: matrix.platform == 'windows'
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --find-interpreter
+          sccache: 'true'
+          working-directory: bindings/python
 
-      - name: Build wheel on macOS (native)
-        if: startsWith(matrix.os, 'macos')
-        run: |
-          cd bindings/python
-          maturin build --release --strip
-
-      - name: Build wheel on Linux x86_64
-        if: matrix.os == 'ubuntu-latest' && matrix.arch == 'x86_64'
-        run: |
-          cd bindings/python
-          maturin build --release
-
-      - name: Build wheel on Linux aarch64
-        if: matrix.os == 'ubuntu-24.04-arm' && matrix.arch == 'aarch64'
-        run: |
-          cd bindings/python
-          maturin build --release
-
-      - name: Build wheel on Windows
-        if: startsWith(matrix.os, 'windows')
-        env:
-          CARGO_BUILD_JOBS: "1"
-          CARGO_INCREMENTAL: "0"
-          RUSTFLAGS: "-C debuginfo=1 -C codegen-units=1 -C link-arg=/DEBUG:FULL -C link-arg=/INCREMENTAL:NO"
-        run: |
-          cd bindings/python
-          maturin build --release
+      - name: Upload wheels
+        uses: actions/upload-artifact@v3
+        with:
+          name: wheels
+          path: bindings/python/dist
 
       - name: Upload to PyPI
         if: startsWith(github.ref, 'refs/tags/')
@@ -78,5 +81,4 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
         run: |
           pip install twine
-          cd bindings/python
-          twine upload target/wheels/* --skip-existing
+          twine upload bindings/python/dist/* --skip-existing
