@@ -7,78 +7,109 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: ${{ matrix.runs-on }}
+  linux:
+    runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
-        include:
-          # Linux
-          - os: ubuntu-latest
-            runs-on: ubuntu-latest
+        platform:
+          - runner: ubuntu-latest
             target: x86_64
-            platform: linux
-          - os: ubuntu-latest
-            runs-on: ubuntu-latest
+          - runner: ubuntu-24.04-arm
             target: aarch64
-            platform: linux
-          # macOS
-          - os: macos-14
-            runs-on: macos-14
-            target: aarch64
-            platform: macos
-          - os: macos-13
-            runs-on: macos-13
-            target: x86_64
-            platform: macos
-          # Windows
-          - os: windows-latest
-            runs-on: windows-latest
-            target: x64
-            platform: windows
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Build wheels (Linux)
-        if: matrix.platform == 'linux'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+
+      - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist
           sccache: 'true'
-          manylinux: auto
+          manylinux: 2014
           working-directory: bindings/python
 
-      - name: Build wheels (macOS)
-        if: matrix.platform == 'macos'
-        uses: PyO3/maturin-action@v1
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
         with:
-          target: ${{ matrix.target }}
-          args: --release --out dist --strip
-          sccache: 'true'
-          working-directory: bindings/python
+          name: wheels-linux-${{ matrix.platform.target }}
+          path: bindings/python/dist
 
-      - name: Build wheels (Windows)
-        if: matrix.platform == 'windows'
+  macos:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - runner: macos-13
+            target: x86_64
+          - runner: macos-14
+            target: aarch64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+
+      - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist
           sccache: 'true'
           working-directory: bindings/python
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: wheels
+          name: wheels-macos-${{ matrix.platform.target }}
           path: bindings/python/dist
 
-      - name: Upload to PyPI
-        if: startsWith(github.ref, 'refs/tags/')
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64
+          args: --release --out dist
+          sccache: 'true'
+          working-directory: bindings/python
         env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
-        run: |
-          pip install twine
-          twine upload bindings/python/dist/* --skip-existing
+          CARGO_BUILD_JOBS: "1"
+          CARGO_INCREMENTAL: "0"
+          RUSTFLAGS: "-C debuginfo=1 -C codegen-units=1 -C link-arg=/DEBUG:FULL -C link-arg=/INCREMENTAL:NO"
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x86_64
+          path: bindings/python/dist
+
+  publish:
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish to PyPI
+        uses: PyO3/maturin-action@v1
+        env:
+          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        with:
+          command: upload
+          args: --non-interactive --skip-existing dist/*
