@@ -482,44 +482,70 @@ impl LatticaSDK {
         })
     }
 
-    fn put_block(&self, data: Vec<u8>) -> PyResult<String> {
-        self.runtime.block_on(async move {
-            let block = BytesBlock(data);
-            let cid = self.lattica.put_block(&block).await?;
-            Ok(cid.to_string())
+    fn put_block(&self, data: &[u8]) -> PyResult<String> {
+        let lattica = self.lattica.clone();
+        let data_owned = data.to_vec();
+        Python::with_gil(|py| {
+            py.allow_threads(|| {
+                self.runtime.block_on(async move {
+                    let block = BytesBlock(data_owned);
+                    let cid = lattica.put_block(&block).await?;
+                    Ok(cid.to_string())
+                })
+            })
         })
     }
 
     fn remove_block(&self, cid_str: &str) -> PyResult<()> {
-        self.runtime.block_on(async move {
-            let cid = Cid::try_from(cid_str)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid CID: {:?}", e)))?;
-            self.lattica.remove_block(&cid).await?;
-            Ok(())
+        let lattica = self.lattica.clone();
+        Python::with_gil(|py| {
+            py.allow_threads(|| {
+                self.runtime.block_on(async move {
+                    let cid = Cid::try_from(cid_str)
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid CID: {:?}", e)))?;
+                    lattica.remove_block(&cid).await?;
+                    Ok(())
+                })
+            })
         })
     }
 
     fn start_providing(&self, key: &str) -> PyResult<()> {
-        self.runtime.block_on(async move {
-            let record = RecordKey::new(&key);
-            self.lattica.start_providing(record).await?;
-            Ok(())
+        let lattica = self.lattica.clone();
+        Python::with_gil(|py| {
+            py.allow_threads(|| {
+                self.runtime.block_on(async move {
+                    let record = RecordKey::new(&key);
+                    lattica.start_providing(record).await?;
+                    Ok(())
+                })
+            })
         })
     }
 
     fn get_providers(&self, key: &str) -> PyResult<Vec<String>> {
-        self.runtime.block_on(async move {
-            let record = RecordKey::new(&key);
-            let peers = self.lattica.get_providers(record).await?;
-            Ok(peers.into_iter().map(|p| p.to_string()).collect())
+        let lattica = self.lattica.clone();
+        Python::with_gil(|py| {
+            py.allow_threads(|| {
+                self.runtime.block_on(async move {
+                    let record = RecordKey::new(&key);
+                    let peers = lattica.get_providers(record).await?;
+                    Ok(peers.into_iter().map(|p| p.to_string()).collect())
+                })
+            })
         })
     }
 
     fn stop_providing(&self, key: &str) -> PyResult<()> {
-        self.runtime.block_on(async move {
-            let record = RecordKey::new(&key);
-            self.lattica.stop_providing(record).await?;
-            Ok(())
+        let lattica = self.lattica.clone();
+        Python::with_gil(|py| {
+            py.allow_threads(|| {
+                self.runtime.block_on(async move {
+                    let record = RecordKey::new(&key);
+                    lattica.stop_providing(record).await?;
+                    Ok(())
+                })
+            })
         })
     }
 
