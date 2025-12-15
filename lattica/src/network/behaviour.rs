@@ -1,11 +1,11 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration};
 use super::{*};
 use crate::rpc;
 use tokio::sync::{oneshot};
 use libp2p::{autonat, dcutr, gossipsub, identify, kad, mdns, ping, relay, rendezvous, upnp, swarm::{NetworkBehaviour, behaviour::toggle::Toggle}, kad::{Quorum, Record, PeerRecord, RecordKey, K_VALUE}, request_response, PeerId, gossipsub::{MessageAuthenticity}, StreamProtocol};
 use anyhow::{anyhow, Result};
-use blockstore::{SledBlockstore};
+use crate::fs_blockstore::FsBlockstore;
 use fnv::{FnvHashMap};
 use libp2p_stream as stream;
 use crate::common::{BytesBlock, QueryId, P2P_CIRCUIT_TOPIC};
@@ -40,11 +40,11 @@ pub struct LatticaBehaviour{
     pub dcutr: Toggle<dcutr::Behaviour>,
     pub relay: Toggle<relay::client::Behaviour>,
     pub gossipsub: gossipsub::Behaviour,
-    pub bitswap: Toggle<beetswap::Behaviour<64, SledBlockstore>>
+    pub bitswap: Toggle<beetswap::Behaviour<256, FsBlockstore>>
 }
 
 impl LatticaBehaviour{
-    pub fn new(config: &mut Config, relay_behavior: Option<relay::client::Behaviour>, storage: Arc<SledBlockstore>) -> Self {
+    pub fn new(config: &mut Config, relay_behavior: Option<relay::client::Behaviour>, storage: Arc<FsBlockstore>) -> Self {
         let peer_id = config.keypair.public().to_peer_id();
         let proto_version: &'static str = Box::leak(config.protocol_version.clone().into_boxed_str());
 
@@ -118,8 +118,8 @@ impl LatticaBehaviour{
         let mut gossipsub = gossipsub::Behaviour::new(MessageAuthenticity::Signed(config.keypair.clone()), gossipsub_config).unwrap();
         let topic = gossipsub::IdentTopic::new(P2P_CIRCUIT_TOPIC);
         gossipsub.subscribe(&topic).unwrap();
-
-        let sd_behaviour = Toggle::from(Some(beetswap::Behaviour::<64, SledBlockstore>::new(storage)));
+        
+        let sd_behaviour = Toggle::from(Some(beetswap::Behaviour::<256, FsBlockstore>::new(storage)));
 
         Self{
             kad,

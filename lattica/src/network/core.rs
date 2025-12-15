@@ -1,12 +1,13 @@
 use crate::common;
 use crate::rpc;
+use crate::fs_blockstore::FsBlockstore;
 use super::{*};
 use std::{sync::Arc, error::Error, fs};
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use libp2p::{noise, tcp, yamux, Swarm, SwarmBuilder, identity,swarm::{SwarmEvent},
-             kad::{RecordKey,Mode, PeerRecord, Quorum, Record}, Multiaddr, multiaddr::{Protocol}, PeerId, futures::{future, StreamExt},
-             request_response::{OutboundRequestId}, Stream};
+            kad::{RecordKey,Mode, PeerRecord, Quorum, Record}, Multiaddr, multiaddr::{Protocol}, PeerId, futures::{future, StreamExt},
+            request_response::{OutboundRequestId}, Stream};
 use futures::{AsyncReadExt, AsyncWriteExt};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -19,7 +20,7 @@ use uuid::Uuid;
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use std::time::{Duration, Instant};
-use blockstore::{Blockstore, SledBlockstore};
+use blockstore::{Blockstore};
 use blockstore::block::Block;
 use crate::common::{compress_data, should_compress, BytesBlock, CompressionAlgorithm, CompressionLevel, QueryId};
 use cid::Cid;
@@ -49,8 +50,8 @@ pub struct Lattica {
     cmd: mpsc::Sender<Command>,
     config: Arc<Config>,
     address_book: Arc<RwLock<AddressBook>>,
-    storage: Arc<SledBlockstore>,
-    symmetric_nat: Arc<RwLock<Option<bool>>>
+    storage: Arc<FsBlockstore>,
+    symmetric_nat: Arc<RwLock<Option<bool>>>,
 }
 
 pub struct LatticaBuilder {
@@ -210,9 +211,8 @@ impl LatticaBuilder {
         if self.config.protocol_version == "".to_string() {
             self.config.protocol_version = format!("/{}", self.config.keypair.public().to_peer_id().to_string());
         }
-
-        let db = sled::open(self.config.clone().storage_path)?;
-        let storage = SledBlockstore::new(db).await?;
+        
+        let storage = FsBlockstore::new(self.config.clone().storage_path.into())?;
         let storage_arc = Arc::new(storage);
 
         let mut swarm = SwarmBuilder::with_existing_identity(self.config.keypair.clone())
