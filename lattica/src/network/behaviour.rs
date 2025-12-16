@@ -21,7 +21,7 @@ pub enum QueryChannel {
     Bootstrap(oneshot::Sender<Result<()>>),
     RendezvousRegister(oneshot::Sender<Result<()>>),
     RendezvousDiscover(oneshot::Sender<Result<Vec<PeerId>>>),
-    Get(oneshot::Sender<Result<BytesBlock>>),
+    Get(oneshot::Sender<Result<(Option<PeerId>, BytesBlock)>>),
     StartProviding(oneshot::Sender<Result<()>>),
     GetProviders(oneshot::Sender<Result<Vec<PeerId>>>),
 }
@@ -227,7 +227,7 @@ impl LatticaBehaviour{
         }
     }
 
-    pub fn get(&mut self, cid: Cid, queries: &mut FnvHashMap<QueryId, QueryChannel>, tx: oneshot::Sender<Result<BytesBlock>>) -> Option<QueryId> {
+    pub fn get(&mut self, cid: Cid, queries: &mut FnvHashMap<QueryId, QueryChannel>, tx: oneshot::Sender<Result<(Option<PeerId>, BytesBlock)>>) -> Option<QueryId> {
         if let Some(bitswap) = self.bitswap.as_mut() {
             let id = bitswap.get(&cid);
             let query_id = id.into();

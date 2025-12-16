@@ -46,9 +46,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         // get block
         let cid = Cid::try_from(cid_arg)?;
-        let data_block = lattica.get_block(&cid, Duration::from_secs(10)).await?;
+        let (peer_id, data_block) = lattica.get_block(&cid, Duration::from_secs(10)).await?;
         let data = data_block.data();
-        tracing::info!("get block,data: {:?}", str::from_utf8(&data)?);
+        tracing::info!("get block from peer: {:?}, data: {:?}", peer_id, str::from_utf8(&data)?);
 
     } else {
         // put block
