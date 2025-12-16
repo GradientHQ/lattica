@@ -37,7 +37,7 @@ pub enum Command{
     RendezvousRegister(PeerId, Option<String>, Option<u64>, oneshot::Sender<Result<()>>),
     RendezvousDiscover(PeerId, Option<String>, Option<u64>, oneshot::Sender<Result<Vec<PeerId>>>),
     GetVisibleMAddrs(oneshot::Sender<Result<Vec<Multiaddr>>>),
-    Get(Cid, oneshot::Sender<Result<BytesBlock>>, oneshot::Sender<Option<QueryId>>),
+    Get(Cid, oneshot::Sender<Result<(Option<PeerId>, BytesBlock)>>, oneshot::Sender<Option<QueryId>>),
     CancelGet(QueryId),
     StartProviding(RecordKey, oneshot::Sender<Result<()>>),
     GetProviders(RecordKey, oneshot::Sender<Result<Vec<PeerId>>>),
@@ -825,7 +825,7 @@ impl Lattica {
         address_book.info(peer_id)?.rtt()
     }
 
-    pub async fn get_block(&self, cid: &Cid, timeout: Duration) -> Result<BytesBlock> {
+    pub async fn get_block(&self, cid: &Cid, timeout: Duration) -> Result<(Option<PeerId>, BytesBlock)> {
         let (tx, rx) = oneshot::channel();
         let (query_id_tx, query_id_rx) = oneshot::channel();
         self.cmd.try_send(Command::Get(*cid, tx, query_id_tx))?;

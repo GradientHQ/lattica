@@ -646,10 +646,10 @@ pub(crate) async fn handle_gossipsub_event(event: gossipsub::Event, swarm: &mut 
 
 pub(crate) async fn handle_bitswap_event(event: beetswap::Event, queries: &mut FnvHashMap<QueryId, QueryChannel>) {
     match event {
-        beetswap::Event::GetQueryResponse {query_id, data} => {
+        beetswap::Event::GetQueryResponse {query_id, peer_id, data} => {
             if let Some(QueryChannel::Get(ch)) = queries.remove(&query_id.into()) {
                 let block = BytesBlock(data);
-                ch.send(Ok(block)).ok();
+                ch.send(Ok((peer_id, block))).ok();
             }
         },
         

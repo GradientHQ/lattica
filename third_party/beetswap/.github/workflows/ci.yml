@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v1
+    - name: Run clippy
+      run: cargo clippy --all --all-targets -- -D warnings
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v1
+    - name: Check missing docs
+      run: cargo clippy --all -- -D missing-docs
+    - name: Run rustdoc check
+      env:
+        RUSTDOCFLAGS: -D warnings
+      run: cargo doc
+
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v1
+    - name: Run fmt
+      run: cargo fmt -- --check
+
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v1
+
+    - name: Set up cargo cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys:
+          cargo-${{ hashFiles('**/Cargo.lock') }}
+          cargo-
+
+    - name: Run tests
+      run: cargo test --locked
+
+
+  test-minimal-versions:
+    runs-on: ubuntu-latest
+    name: test (minimal versions)
+    steps:
+    - uses: actions/checkout@v1
+
+    - name: Install nightly toolchain
+      uses: dtolnay/rust-toolchain@nightly
+
+    - name: Generate Cargo.lock with minimal versions
+      run: |
+        rm Cargo.lock
+        cargo +nightly update -Zminimal-versions
+
+    - name: Install stable toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Set up cargo cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys:
+          cargo-${{ hashFiles('**/Cargo.lock') }}
+          cargo-
+
+    - name: Run tests
+      run: cargo +stable test --locked
+
+
+  unused-deps:
+    runs-on: ubuntu-latest
+    name: unused dependencies
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@v3
+
+    - name: Install toolchain
+      uses: dtolnay/rust-toolchain@nightly
+
+    - name: Install cargo-udeps
+      uses: taiki-e/cache-cargo-install-action@v1
+      with:
+        tool: cargo-udeps@0.1.48
+
+    - name: Check for unused dependencies
+      run: cargo +nightly udeps --all-targets
+      env:
+        RUSTFLAGS: -D warnings

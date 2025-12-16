@@ -1,4 +1,4 @@
-from typing import Optional, Any, List, Union
+from typing import Optional, Any, List, Union, Tuple
 import pickle
 import time
 from dataclasses import dataclass
@@ -211,7 +211,7 @@ class Lattica:
         except Exception as e:
             raise RuntimeError(f"Failed to put block: {e}")
 
-    def get_block(self, cid: str, timeout_secs: int = 10) -> bytes:
+    def get_block(self, cid: str, timeout_secs: int = 30) -> Tuple[Optional[str], bytes]:
         try:
             return self._lattica_instance.get_block(cid, timeout_secs=timeout_secs)
         except Exception as e:

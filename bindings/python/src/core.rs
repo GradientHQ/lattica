@@ -463,8 +463,8 @@ impl LatticaSDK {
         })
     }
 
-    #[pyo3(signature = (cid_str, *, timeout_secs = 10))]
-    fn get_block(&self, cid_str: &str, timeout_secs: u64) -> PyResult<Vec<u8>> {
+    #[pyo3(signature = (cid_str, *, timeout_secs = 30))]
+    fn get_block(&self, cid_str: &str, timeout_secs: u64) -> PyResult<(Option<String>, Vec<u8>)> {
         let lattica = self.lattica.clone();
         Python::with_gil(|py| {
             py.allow_threads(|| {
@@ -472,11 +472,12 @@ impl LatticaSDK {
                     let cid = Cid::try_from(cid_str)
                         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid CID: {:?}", e)))?;
                     // Use get_block which handles timeout and cancellation internally
-                    let bc = lattica.get_block(&cid, Duration::from_secs(timeout_secs)).await
+                    let (peer_id, bc) = lattica.get_block(&cid, Duration::from_secs(timeout_secs)).await
                         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                             format!("get_block failed: {}", e)
                         ))?;
-                    Ok(bc.0)
+                    let peer_id_str = peer_id.map(|p| p.to_string());
+                    Ok((peer_id_str, bc.0))
                 })
             })
         })
