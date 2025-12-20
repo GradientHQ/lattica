@@ -50,6 +50,21 @@ impl From<libp2p::kad::QueryId> for QueryId {
     }
 }
 
+impl QueryId {
+    pub fn as_beetswap(&self) -> Option<beetswap::QueryId> {
+        match self.0 {
+            InnerQueryId::Bitswap(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    pub fn as_kad(&self) -> Option<libp2p::kad::QueryId> {
+        match self.0 {
+            InnerQueryId::Kad(id) => Some(id),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct BytesBlock(pub Vec<u8>);
