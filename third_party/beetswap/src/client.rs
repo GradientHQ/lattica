@@ -304,40 +304,58 @@ where
         // TODO: If someone sends a huge message, the executor will block! We need to
         // truncate the data, maybe even in the `message::Codec` level
         for (cid, block) in msg.blocks {
+            let block_size = block.len();
+            
+            tracing::info!("收到数据块: CID={}, size={}, wantlist包含={}", cid, block_size, self.wantlist.cids.contains(&cid));
+            
+            // ===== 始终更新统计（无论 CID 是否在 wantlist 中）=====
+            // 尝试从 tracker 获取精确时间
+            let (elapsed_ms, tracker_info) = if let Some(tracker) = self.request_trackers.remove(&cid) {
+                let elapsed = tracker.start_time.elapsed();
+                let phase = match tracker.request_phase {
+                    RequestPhase::Probing => "probe",
+                    RequestPhase::Fetching => "fetch",
+                };
+                (elapsed.as_millis() as u64, format!("tracked({})", phase))
+            } else {
+                // 没有 tracker - 可能是以下情况：
+                // 1. 服务器主动推送
+                // 2. tracker 已被其他线程消费
+                // 3. 请求在 tracker 创建之前就返回了
+                tracing::warn!("⚠ CID {} 没有 tracker，无法记录精确时间", cid);
+                (0, "no_tracker".to_string())
+            };
+
+            // 记录节点成功
+            peer_state.metrics.record_success(block_size, elapsed_ms);
+
+            // 更新全局统计
+            self.global_stats.successful_requests += 1;
+            self.global_stats.total_bytes_received += block_size as u64;
+
+            // 计算速度并记录日志
+            let speed_mbps = if elapsed_ms > 0 {
+                (block_size as f64 / elapsed_ms as f64) * 1000.0 / (1024.0 * 1024.0)
+            } else {
+                0.0
+            };
+
+            tracing::info!(
+                "✓ 接收 CID {} 从节点 {} | {:.2} MB | {} ms | {:.2} MB/s | 评分: {:.2} | {}",
+                cid,
+                peer,
+                block_size as f64 / (1024.0 * 1024.0),
+                elapsed_ms,
+                speed_mbps,
+                peer_state.metrics.calculate_score(),
+                tracker_info
+            );
+            
+            // 检查 wantlist 并处理查询响应
             if !self.wantlist.remove(&cid) {
                 debug_assert!(!self.cid_to_queries.contains_key(&cid));
+                tracing::debug!("收到未请求的 CID: {}, 已更新统计但跳过查询响应", cid);
                 continue;
-            }
-
-            // ===== 新增：记录传输统计 =====
-            if let Some(tracker) = self.request_trackers.remove(&cid) {
-                let elapsed = tracker.start_time.elapsed();
-                let elapsed_ms = elapsed.as_millis() as u64;
-                let block_size = block.len();
-
-                // 记录节点成功
-                peer_state.metrics.record_success(block_size, elapsed_ms);
-
-                // 更新全局统计
-                self.global_stats.successful_requests += 1;
-                self.global_stats.total_bytes_received += block_size as u64;
-
-                // 计算速度并记录日志
-                let speed_mbps = if elapsed_ms > 0 {
-                    (block_size as f64 / elapsed_ms as f64) * 1000.0 / (1024.0 * 1024.0)
-                } else {
-                    0.0
-                };
-
-                tracing::info!(
-                    "✓ 接收 CID {} 从节点 {} | {} bytes | {} ms | {:.2} MB/s | 节点评分: {:.2}",
-                    cid,
-                    peer,
-                    block_size,
-                    elapsed_ms,
-                    speed_mbps,
-                    peer_state.metrics.calculate_score()
-                );
             }
 
             peer_state.wantlist.got_block(&cid);
@@ -427,11 +445,17 @@ where
                 RequestTracker {
                     cid: *cid,
                     start_time: Instant::now(),
-                    want_block_sent_time: Some(Instant::now()),
+                    want_block_sent_time: None,
                     peers_sent: FnvHashSet::default(),
-                    request_phase: RequestPhase::Fetching,
+                    request_phase: RequestPhase::Probing,
                 }
             });
+            
+            // 更新 tracker 状态为 Fetching 阶段
+            if tracker.want_block_sent_time.is_none() {
+                tracker.want_block_sent_time = Some(Instant::now());
+            }
+            tracker.request_phase = RequestPhase::Fetching;
 
             for peer_id in &selected {
                 tracker.peers_sent.insert(*peer_id);
@@ -685,6 +709,17 @@ where
                     TaskResult::Get(query_id, cid, Ok(None)) => {
                         self.wantlist.insert(cid);
                         self.cid_to_queries.entry(cid).or_default().push(query_id);
+                        
+                        // ===== 立即创建 RequestTracker 以记录精确的请求时间 =====
+                        self.request_trackers.entry(cid).or_insert_with(|| {
+                            RequestTracker {
+                                cid,
+                                start_time: Instant::now(),
+                                want_block_sent_time: None,  // 稍后在发送 WantBlock 时更新
+                                peers_sent: FnvHashSet::default(),
+                                request_phase: RequestPhase::Probing,
+                            }
+                        });
                     }
 
                     // Blockstore error
