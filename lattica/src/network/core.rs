@@ -1156,6 +1156,12 @@ async fn swarm_poll(
                     let _ = query_id_tx.send(query_id);
                 }
                 Command::CancelGet(query_id) => {
+                    if let Some(beetswap_id) = query_id.as_beetswap() {
+                        if let Some(bitswap) = swarm.behaviour_mut().bitswap.as_mut() {
+                            bitswap.cancel(beetswap_id);
+                        }
+                    }
+                    
                     if let Some(QueryChannel::Get(ch)) = queries.remove(&query_id) {
                         // Send error to indicate cancellation, then drop the channel
                         let _ = ch.send(Err(anyhow!("Query cancelled")));
