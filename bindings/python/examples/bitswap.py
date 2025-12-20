@@ -26,6 +26,8 @@ def main():
             data = lattica.get_block(request_cid)
             print(f"data: {data}")
 
+            lattica.print_bitswap_stats()
+
         else:
             # put block
             cid = lattica.put_block(b'hello')

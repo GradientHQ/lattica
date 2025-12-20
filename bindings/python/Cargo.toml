@@ -20,5 +20,8 @@ cid = "0.11.1"
 [dependencies.lattica]
 path = "../../lattica"
 
+[dependencies.beetswap]
+path = "../../third_party/beetswap"
+
 [profile.release]
 debug = false

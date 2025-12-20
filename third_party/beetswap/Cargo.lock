@@ -492,6 +492,7 @@ dependencies = [
  "multihash",
  "multihash-codetable",
  "quick-protobuf",
+ "rand",
  "smallvec",
  "thiserror",
  "time",

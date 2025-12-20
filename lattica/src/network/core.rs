@@ -42,6 +42,10 @@ pub enum Command{
     StartProviding(RecordKey, oneshot::Sender<Result<()>>),
     GetProviders(RecordKey, oneshot::Sender<Result<Vec<PeerId>>>),
     StopProviding(RecordKey, oneshot::Sender<Result<()>>),
+    ConfigureBitswapPeerSelection(beetswap::PeerSelectionConfig, oneshot::Sender<Result<()>>),
+    GetBitswapGlobalStats(oneshot::Sender<Result<beetswap::GlobalStats>>),
+    GetBitswapPeerRankings(oneshot::Sender<Result<Vec<(PeerId, f64)>>>),
+    PrintBitswapStats,
 }
 
 #[derive(Clone)]
@@ -890,6 +894,32 @@ impl Lattica {
             .map_err(|_| anyhow!("Failed to read symmetric_nat"))?;
         Ok(*nat)
     }
+
+    /// 配置 Bitswap 节点选择策略
+    pub async fn configure_bitswap_peer_selection(&self, config: beetswap::PeerSelectionConfig) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd.try_send(Command::ConfigureBitswapPeerSelection(config, tx))?;
+        rx.await?
+    }
+
+    /// 获取 Bitswap 全局统计
+    pub async fn get_bitswap_global_stats(&self) -> Result<beetswap::GlobalStats> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd.try_send(Command::GetBitswapGlobalStats(tx))?;
+        rx.await?
+    }
+
+    /// 获取 Bitswap 节点评分排名
+    pub async fn get_bitswap_peer_rankings(&self) -> Result<Vec<(PeerId, f64)>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd.try_send(Command::GetBitswapPeerRankings(tx))?;
+        rx.await?
+    }
+
+    /// 打印 Bitswap 统计报告
+    pub fn print_bitswap_stats(&self) {
+        self.cmd.try_send(Command::PrintBitswapStats).ok();
+    }
 }
 
 impl Drop for Lattica {
@@ -1169,6 +1199,21 @@ async fn swarm_poll(
                 }
                 Command::StopProviding(key, tx) => {
                     swarm.behaviour_mut().stop_providing(key, tx);
+                }
+                Command::ConfigureBitswapPeerSelection(config, tx) => {
+                    swarm.behaviour_mut().configure_bitswap_peer_selection(config);
+                    let _ = tx.send(Ok(()));
+                }
+                Command::GetBitswapGlobalStats(tx) => {
+                    let stats = swarm.behaviour().get_bitswap_global_stats();
+                    let _ = tx.send(stats.ok_or_else(|| anyhow!("Bitswap is not enabled")));
+                }
+                Command::GetBitswapPeerRankings(tx) => {
+                    let rankings = swarm.behaviour().get_bitswap_peer_rankings();
+                    let _ = tx.send(Ok(rankings));
+                }
+                Command::PrintBitswapStats => {
+                    swarm.behaviour().print_bitswap_stats();
                 }
             }
         }

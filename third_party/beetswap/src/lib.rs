@@ -28,6 +28,7 @@ mod client;
 mod incoming_stream;
 mod message;
 pub mod multihasher;
+mod peer_selection;
 mod proto;
 mod server;
 #[cfg(test)]
@@ -43,6 +44,7 @@ use crate::server::{ServerBehaviour, ServerConnectionHandler};
 
 pub use crate::builder::BehaviourBuilder;
 pub use crate::client::QueryId;
+pub use crate::peer_selection::{GlobalStats, PeerMetrics, PeerSelectionConfig};
 
 /// [`NetworkBehaviour`] for Bitswap protocol.
 #[derive(Debug)]
@@ -148,6 +150,36 @@ where
     /// Cancel an ongoing query.
     pub fn cancel(&mut self, query_id: QueryId) {
         self.client.cancel(query_id)
+    }
+
+    /// 设置节点选择配置
+    pub fn set_peer_selection_config(&mut self, config: PeerSelectionConfig) {
+        self.client.set_peer_selection_config(config);
+    }
+
+    /// 获取节点选择配置
+    pub fn get_peer_selection_config(&self) -> &PeerSelectionConfig {
+        self.client.get_peer_selection_config()
+    }
+
+    /// 获取节点性能指标
+    pub fn get_peer_metrics(&self, peer_id: &PeerId) -> Option<&PeerMetrics> {
+        self.client.get_peer_metrics(peer_id)
+    }
+
+    /// 获取所有节点的评分排名
+    pub fn get_peer_rankings(&self) -> Vec<(PeerId, f64)> {
+        self.client.get_peer_rankings()
+    }
+
+    /// 获取全局传输统计
+    pub fn get_global_stats(&self) -> &GlobalStats {
+        self.client.get_global_stats()
+    }
+
+    /// 打印统计报告
+    pub fn print_stats_report(&self) {
+        self.client.print_stats_report();
     }
 }
 

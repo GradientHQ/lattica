@@ -8,7 +8,7 @@ use crate::proto::message::mod_Message::Wantlist as ProtoWantlist;
 
 #[derive(Debug)]
 pub(crate) struct Wantlist<const S: usize> {
-    cids: FnvHashSet<CidGeneric<S>>,
+    pub(crate) cids: FnvHashSet<CidGeneric<S>>,
     revision: u64,
     set_send_dont_have: bool,
 }
@@ -89,7 +89,24 @@ impl<const S: usize> WantlistState<S> {
             .and_modify(|state| *state = WantReqState::GotBlock);
     }
 
+    /// 检查是否收到了 Have 响应
+    pub(crate) fn has_received_have(&self, cid: &CidGeneric<S>) -> bool {
+        matches!(
+            self.req_state.get(cid),
+            Some(WantReqState::GotHave) | Some(WantReqState::SentWantBlock)
+        )
+    }
+
     pub(crate) fn generate_proto_full(&mut self, wantlist: &Wantlist<S>) -> ProtoWantlist {
+        self.generate_proto_full_with_filter(wantlist, None)
+    }
+
+    /// 生成完整 wantlist，支持选择性发送 WantBlock
+    pub(crate) fn generate_proto_full_with_filter(
+        &mut self,
+        wantlist: &Wantlist<S>,
+        should_send_want_block: Option<&FnvHashSet<CidGeneric<S>>>,
+    ) -> ProtoWantlist {
         // Remove canceled requests or received blocks
         self.req_state.retain(|cid, _| wantlist.cids.contains(cid));
 
@@ -108,8 +125,18 @@ impl<const S: usize> WantlistState<S> {
                     entries.push(new_want_have_entry(cid, wantlist.set_send_dont_have));
                 }
                 WantReqState::GotHave => {
-                    entries.push(new_want_block_entry(cid, wantlist.set_send_dont_have));
-                    *req_state = WantReqState::SentWantBlock;
+                    // 检查该节点是否被选中发送 WantBlock
+                    let should_send = should_send_want_block
+                        .map(|set| set.contains(cid))
+                        .unwrap_or(true);
+
+                    if should_send {
+                        entries.push(new_want_block_entry(cid, wantlist.set_send_dont_have));
+                        *req_state = WantReqState::SentWantBlock;
+                    } else {
+                        // 未被选中，继续发送 WantHave
+                        entries.push(new_want_have_entry(cid, wantlist.set_send_dont_have));
+                    }
                 }
                 WantReqState::GotDontHave => {
                     // Nothing to request
@@ -130,6 +157,15 @@ impl<const S: usize> WantlistState<S> {
     }
 
     pub(crate) fn generate_proto_update(&mut self, wantlist: &Wantlist<S>) -> ProtoWantlist {
+        self.generate_proto_update_with_filter(wantlist, None)
+    }
+
+    /// 生成增量 wantlist，支持选择性发送 WantBlock
+    pub(crate) fn generate_proto_update_with_filter(
+        &mut self,
+        wantlist: &Wantlist<S>,
+        should_send_want_block: Option<&FnvHashSet<CidGeneric<S>>>,
+    ) -> ProtoWantlist {
         if self.is_updated(wantlist) {
             return ProtoWantlist::default();
         }
@@ -163,8 +199,16 @@ impl<const S: usize> WantlistState<S> {
                 (true, WantReqState::SentWantHave) => {}
 
                 (true, WantReqState::GotHave) => {
-                    entries.push(new_want_block_entry(cid, wantlist.set_send_dont_have));
-                    *req_state = WantReqState::SentWantBlock;
+                    // 检查该节点是否被选中发送 WantBlock
+                    let should_send = should_send_want_block
+                        .map(|set| set.contains(cid))
+                        .unwrap_or(true);
+
+                    if should_send {
+                        entries.push(new_want_block_entry(cid, wantlist.set_send_dont_have));
+                        *req_state = WantReqState::SentWantBlock;
+                    }
+                    // 如果未被选中，不发送任何请求（继续等待）
                 }
 
                 // Server responsed with DontHave. We have nothing else to do.

@@ -24,6 +24,7 @@ use web_time::Instant;
 
 use crate::incoming_stream::ClientMessage;
 use crate::message::Codec;
+use crate::peer_selection::{GlobalStats, PeerMetrics, PeerSelectionConfig, PeerSelector, RequestPhase, RequestTracker};
 use crate::proto::message::mod_Message::{BlockPresenceType, Wantlist as ProtoWantlist};
 use crate::proto::message::Message;
 use crate::utils::{box_future, convert_cid, stream_protocol, BoxFuture};
@@ -78,6 +79,12 @@ where
     next_query_id: u64,
     send_full_timer: Delay,
     new_blocks: Vec<(CidGeneric<S>, Vec<u8>)>,
+    /// 节点选择配置
+    peer_selection_config: PeerSelectionConfig,
+    /// 请求跟踪表
+    request_trackers: FnvHashMap<CidGeneric<S>, RequestTracker<S>>,
+    /// 全局统计
+    global_stats: GlobalStats,
 }
 
 #[derive(Debug)]
@@ -97,6 +104,8 @@ struct PeerState<const S: usize> {
     sending_state: SendingState,
     wantlist: WantlistState<S>,
     send_full: bool,
+    /// 节点性能指标
+    metrics: PeerMetrics,
 }
 
 /// Sending state of the `ClientConnectionHandler`.
@@ -149,6 +158,9 @@ where
             next_query_id: 0,
             send_full_timer: Delay::new(SEND_FULL_INTERVAL),
             new_blocks: Vec::new(),
+            peer_selection_config: PeerSelectionConfig::default(),
+            request_trackers: FnvHashMap::default(),
+            global_stats: GlobalStats::default(),
         }
     }
 
@@ -162,6 +174,7 @@ where
             sending_state: SendingState::Ready,
             wantlist: WantlistState::new(),
             send_full: true,
+            metrics: PeerMetrics::default(),
         });
 
         peer.established_connections.insert(connection_id);
@@ -296,6 +309,37 @@ where
                 continue;
             }
 
+            // ===== 新增：记录传输统计 =====
+            if let Some(tracker) = self.request_trackers.remove(&cid) {
+                let elapsed = tracker.start_time.elapsed();
+                let elapsed_ms = elapsed.as_millis() as u64;
+                let block_size = block.len();
+
+                // 记录节点成功
+                peer_state.metrics.record_success(block_size, elapsed_ms);
+
+                // 更新全局统计
+                self.global_stats.successful_requests += 1;
+                self.global_stats.total_bytes_received += block_size as u64;
+
+                // 计算速度并记录日志
+                let speed_mbps = if elapsed_ms > 0 {
+                    (block_size as f64 / elapsed_ms as f64) * 1000.0 / (1024.0 * 1024.0)
+                } else {
+                    0.0
+                };
+
+                tracing::info!(
+                    "✓ 接收 CID {} 从节点 {} | {} bytes | {} ms | {:.2} MB/s | 节点评分: {:.2}",
+                    cid,
+                    peer,
+                    block_size,
+                    elapsed_ms,
+                    speed_mbps,
+                    peer_state.metrics.calculate_score()
+                );
+            }
+
             peer_state.wantlist.got_block(&cid);
             new_blocks.push((cid, block.clone()));
 
@@ -328,10 +372,77 @@ where
         let mut handler_updated = false;
         let mut peers_without_connection = SmallVec::<[PeerId; 8]>::new();
 
+        // ===== 新增：智能节点选择逻辑 =====
+        // 第一步：识别哪些 CID 已经收到 Have 响应，准备进入 WantBlock 阶段
+        let mut cid_to_candidates: FnvHashMap<CidGeneric<S>, Vec<PeerId>> = FnvHashMap::default();
+        
+        for cid in &self.wantlist.cids {
+            let candidates: Vec<PeerId> = self
+                .peers
+                .iter()
+                .filter(|(_, state)| state.wantlist.has_received_have(cid))
+                .map(|(peer_id, _)| *peer_id)
+                .collect();
+            
+            if !candidates.is_empty() {
+                cid_to_candidates.insert(*cid, candidates);
+            }
+        }
+
+        // 第二步：为每个需要 WantBlock 的 CID 选择最优节点
+        let mut selected_peers_for_cid: FnvHashMap<CidGeneric<S>, Vec<PeerId>> = FnvHashMap::default();
+        
+        for (cid, candidate_peers) in &cid_to_candidates {
+            let candidates_with_metrics: FnvHashMap<PeerId, &PeerMetrics> = candidate_peers
+                .iter()
+                .filter_map(|peer_id| {
+                    self.peers.get(peer_id).map(|state| (*peer_id, &state.metrics))
+                })
+                .collect();
+
+            if candidates_with_metrics.is_empty() {
+                continue;
+            }
+
+            // 使用智能选择器选择 top N 节点
+            let selected = PeerSelector::select_top_peers(
+                &candidates_with_metrics,
+                &self.peer_selection_config,
+            );
+
+            debug!(
+                "CID {} - 候选节点: {}, 选中节点: {} 个",
+                cid,
+                candidates_with_metrics.len(),
+                selected.len()
+            );
+
+            // 调试：打印节点排名
+            if tracing::enabled!(tracing::Level::DEBUG) && candidates_with_metrics.len() > 1 {
+                PeerSelector::print_peer_rankings(&candidates_with_metrics);
+            }
+
+            // 记录请求跟踪信息
+            let tracker = self.request_trackers.entry(*cid).or_insert_with(|| {
+                RequestTracker {
+                    cid: *cid,
+                    start_time: Instant::now(),
+                    want_block_sent_time: Some(Instant::now()),
+                    peers_sent: FnvHashSet::default(),
+                    request_phase: RequestPhase::Fetching,
+                }
+            });
+
+            for peer_id in &selected {
+                tracker.peers_sent.insert(*peer_id);
+            }
+
+            selected_peers_for_cid.insert(*cid, selected);
+        }
+
+        // 第三步：为每个节点生成 wantlist
         for (peer, state) in self.peers.iter_mut() {
-            // Clear out bad connections. In case of a bad connection we
-            // must send the full wantlist because we don't know what
-            // the remote peer has received.
+            // Clear out bad connections
             match state.sending_state {
                 SendingState::Ready => {
                     // Allowed to send
@@ -341,8 +452,7 @@ where
                         // Sending in progress
                         continue;
                     }
-                    // Bad connection.
-                    // `ClientConnectionHandler` didn't receive `SendWantlist` request before timeout.
+                    // Bad connection
                     state.established_connections.remove(&connection_id);
                     state.send_full = true;
                     state.sending_state = SendingState::Ready;
@@ -356,8 +466,7 @@ where
                     continue;
                 }
                 SendingState::Failed(connection_id) => {
-                    // Bad connection.
-                    // `ClientConnectionHandler` failed to send wantlist because of network issues.
+                    // Bad connection
                     state.established_connections.remove(&connection_id);
                     state.send_full = true;
                     state.sending_state = SendingState::Ready;
@@ -369,21 +478,23 @@ where
                 continue;
             };
 
+            // 确定该节点是否应该接收 WantBlock 请求
+            let should_send_want_blocks: FnvHashSet<CidGeneric<S>> = selected_peers_for_cid
+                .iter()
+                .filter(|(_, selected_peers)| selected_peers.contains(peer))
+                .map(|(cid, _)| *cid)
+                .collect();
+
             let wantlist = if state.send_full {
-                state.wantlist.generate_proto_full(&self.wantlist)
+                state.wantlist.generate_proto_full_with_filter(&self.wantlist, Some(&should_send_want_blocks))
             } else {
-                // NOTE: `generate_proto_update` alters the internal state of `WantlistState`
-                // each time it is called. So after calling it, any error should be recovered
-                // with `send_full`, even if the error happens before any byte leaves the wire.
-                state.wantlist.generate_proto_update(&self.wantlist)
+                state.wantlist.generate_proto_update_with_filter(&self.wantlist, Some(&should_send_want_blocks))
             };
 
-            // Allow empty entries to be sent when send_full flag is set.
+            // Allow empty entries to be sent when send_full flag is set
             if state.send_full {
-                // Reset flag
                 state.send_full = false;
             } else if wantlist.entries.is_empty() {
-                // No updates to be sent for this peer
                 continue;
             }
 
@@ -402,8 +513,142 @@ where
             self.peers.remove(&peer);
         }
 
-        // This is true if at least one handler is updated
         handler_updated
+    }
+
+    /// 设置节点选择配置
+    pub(crate) fn set_peer_selection_config(&mut self, config: PeerSelectionConfig) {
+        self.peer_selection_config = config.clone();
+        tracing::info!(
+            "节点选择配置已更新: top_n={}, enabled={}, min_peers={}, randomness={}",
+            config.top_n,
+            config.enabled,
+            config.min_peers,
+            config.enable_randomness
+        );
+    }
+
+    /// 获取节点选择配置
+    pub(crate) fn get_peer_selection_config(&self) -> &PeerSelectionConfig {
+        &self.peer_selection_config
+    }
+
+    /// 获取节点指标
+    pub(crate) fn get_peer_metrics(&self, peer_id: &PeerId) -> Option<&PeerMetrics> {
+        self.peers.get(peer_id).map(|state| &state.metrics)
+    }
+
+    /// 获取所有节点的评分排名
+    pub(crate) fn get_peer_rankings(&self) -> Vec<(PeerId, f64)> {
+        let mut rankings: Vec<(PeerId, f64)> = self
+            .peers
+            .iter()
+            .map(|(peer_id, state)| (*peer_id, state.metrics.calculate_score()))
+            .collect();
+
+        rankings.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        rankings
+    }
+
+    /// 获取全局统计
+    pub(crate) fn get_global_stats(&self) -> &GlobalStats {
+        &self.global_stats
+    }
+
+    /// 打印统计报告
+    pub(crate) fn print_stats_report(&self) {
+        let stats = &self.global_stats;
+        let total_requests = stats.successful_requests + stats.failed_requests;
+        let success_rate = if total_requests > 0 {
+            (stats.successful_requests as f64 / total_requests as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        tracing::info!(
+            "\n╔════════════════════════════════════════════════════════╗\n\
+             ║     Beetswap 智能节点选择统计报告                      ║\n\
+             ╠════════════════════════════════════════════════════════╣\n\
+             ║ 配置: Top {} 节点, 启用: {}, 随机性: {}           ║\n\
+             ║ 总请求: {}, 成功: {}, 失败: {}                   ║\n\
+             ║ 成功率: {:.2}%                                        ║\n\
+             ║ 总接收数据: {:.2} MB                                 ║\n\
+             ╚════════════════════════════════════════════════════════╝",
+            self.peer_selection_config.top_n,
+            self.peer_selection_config.enabled,
+            self.peer_selection_config.enable_randomness,
+            total_requests,
+            stats.successful_requests,
+            stats.failed_requests,
+            success_rate,
+            stats.total_bytes_received as f64 / (1024.0 * 1024.0)
+        );
+
+        let rankings = self.get_peer_rankings();
+        if !rankings.is_empty() {
+            tracing::info!("\n前 {} 名节点排名:", rankings.len().min(10));
+            for (i, (peer_id, score)) in rankings.iter().take(10).enumerate() {
+                if let Some(metrics) = self.get_peer_metrics(peer_id) {
+                    tracing::info!(
+                        "  #{:<2} 节点: {} | 评分: {:.2} | 成功: {} | 失败: {} | 成功率: {:.1}% | 速度: {:.2} MB/s | RTT: {:.0}ms",
+                        i + 1,
+                        peer_id,
+                        score,
+                        metrics.blocks_received,
+                        metrics.failures,
+                        metrics.success_rate() * 100.0,
+                        metrics.avg_speed() / (1024.0 * 1024.0),
+                        metrics.avg_rtt_ms
+                    );
+                }
+            }
+        }
+    }
+
+    /// 处理请求超时或失败
+    pub(crate) fn handle_request_failure(&mut self, cid: &CidGeneric<S>, peer: Option<PeerId>) {
+        if let Some(tracker) = self.request_trackers.remove(cid) {
+            self.global_stats.failed_requests += 1;
+
+            if let Some(peer_id) = peer {
+                if let Some(peer_state) = self.peers.get_mut(&peer_id) {
+                    peer_state.metrics.record_failure();
+
+                    tracing::warn!(
+                        "✗ CID {} 从节点 {} 失败 | 新评分: {:.2}",
+                        cid,
+                        peer_id,
+                        peer_state.metrics.calculate_score()
+                    );
+                }
+            } else {
+                // 不知道是哪个节点失败，给所有发送过的节点记录失败
+                for peer_id in &tracker.peers_sent {
+                    if let Some(peer_state) = self.peers.get_mut(peer_id) {
+                        peer_state.metrics.record_failure();
+                    }
+                }
+            }
+        }
+    }
+
+    /// 定期清理过期的请求跟踪
+    pub(crate) fn cleanup_stale_trackers(&mut self) {
+        let now = Instant::now();
+        let mut stale_cids = Vec::new();
+
+        for (cid, tracker) in &self.request_trackers {
+            let age = now.duration_since(tracker.start_time).as_secs();
+            if age > 60 {
+                stale_cids.push(*cid);
+            }
+        }
+
+        for cid in stale_cids {
+            self.request_trackers.remove(&cid);
+            self.global_stats.failed_requests += 1;
+            tracing::warn!("清理过期请求: CID {}, 超时", cid);
+        }
     }
 
     /// This is polled by `Behaviour`, which is polled by `Swarm`.

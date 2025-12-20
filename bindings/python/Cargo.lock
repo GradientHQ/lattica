@@ -513,6 +513,7 @@ dependencies = [
  "libp2p-swarm",
  "multihash-codetable",
  "quick-protobuf",
+ "rand 0.8.5",
  "smallvec",
  "thiserror 1.0.69",
  "time",
@@ -2147,6 +2148,7 @@ name = "lattica-python-core"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "beetswap",
  "cid",
  "lattica",
  "libp2p",

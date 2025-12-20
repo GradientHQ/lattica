@@ -253,6 +253,61 @@ class Lattica:
         except Exception as e:
             raise RuntimeError(f"Failed to check is_symmetric_nat error: {e}")
 
+    def configure_bitswap_peer_selection(
+        self,
+        top_n: int = 3,
+        enabled: bool = True,
+        min_peers: int = 2,
+        enable_randomness: bool = True
+    ) -> None:
+        """配置 Bitswap 节点选择策略
+        
+        Args:
+            top_n: 选择最优的 N 个节点
+            enabled: 是否启用智能选择
+            min_peers: 最小节点数阈值
+            enable_randomness: 是否启用随机性
+        """
+        self._ensure_initialized()
+        try:
+            return self._lattica_instance.configure_bitswap_peer_selection(
+                top_n, enabled, min_peers, enable_randomness
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to configure bitswap peer selection: {e}")
+
+    def get_bitswap_global_stats(self) -> dict:
+        """获取 Bitswap 全局统计信息
+        
+        Returns:
+            dict: 包含 total_requests, successful_requests, failed_requests, total_bytes_received
+        """
+        self._ensure_initialized()
+        try:
+            return self._lattica_instance.get_bitswap_global_stats()
+        except Exception as e:
+            raise RuntimeError(f"Failed to get bitswap global stats: {e}")
+
+    def get_bitswap_peer_rankings(self) -> List[Tuple[str, float]]:
+        """获取 Bitswap 节点评分排名
+        
+        Returns:
+            List[Tuple[str, float]]: (peer_id, score) 元组列表，按评分降序排列
+        """
+        self._ensure_initialized()
+        try:
+            return self._lattica_instance.get_bitswap_peer_rankings()
+        except Exception as e:
+            raise RuntimeError(f"Failed to get bitswap peer rankings: {e}")
+
+    def print_bitswap_stats(self) -> None:
+        """打印 Bitswap 统计报告到日志"""
+        self._ensure_initialized()
+        try:
+            return self._lattica_instance.print_bitswap_stats()
+        except Exception as e:
+            raise RuntimeError(f"Failed to print bitswap stats: {e}")
+
     def __enter__(self):
         self._ensure_initialized()
         return self
