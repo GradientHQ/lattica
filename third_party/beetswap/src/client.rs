@@ -308,9 +308,12 @@ where
             
             tracing::info!("收到数据块: CID={}, size={}, wantlist包含={}", cid, block_size, self.wantlist.cids.contains(&cid));
             
-            // ===== 始终更新统计（无论 CID 是否在 wantlist 中）=====
+            // ===== 检查是否是重复数据（同一 CID 从多个节点返回）=====
+            let is_first_response = self.wantlist.cids.contains(&cid);
+            
+            // ===== 始终更新节点统计（每个节点的性能都要记录）=====
             // 尝试从 tracker 获取精确时间
-            let (elapsed_ms, tracker_info) = if let Some(tracker) = self.request_trackers.remove(&cid) {
+            let (elapsed_ms, tracker_info) = if let Some(tracker) = self.request_trackers.get(&cid) {
                 let elapsed = tracker.start_time.elapsed();
                 let phase = match tracker.request_phase {
                     RequestPhase::Probing => "probe",
@@ -318,20 +321,27 @@ where
                 };
                 (elapsed.as_millis() as u64, format!("tracked({})", phase))
             } else {
-                // 没有 tracker - 可能是以下情况：
-                // 1. 服务器主动推送
-                // 2. tracker 已被其他线程消费
-                // 3. 请求在 tracker 创建之前就返回了
-                tracing::warn!("⚠ CID {} 没有 tracker，无法记录精确时间", cid);
+                // 没有 tracker - 可能是重复响应
+                if !is_first_response {
+                    tracing::debug!("⚠ CID {} 的重复响应，跳过统计", cid);
+                } else {
+                    tracing::warn!("⚠ CID {} 没有 tracker，无法记录精确时间", cid);
+                }
                 (0, "no_tracker".to_string())
             };
 
-            // 记录节点成功
+            // 记录节点成功（每个返回数据的节点都记录）
             peer_state.metrics.record_success(block_size, elapsed_ms);
 
-            // 更新全局统计
-            self.global_stats.successful_requests += 1;
-            self.global_stats.total_bytes_received += block_size as u64;
+            // ===== 只有第一次收到数据时才更新全局统计 =====
+            if is_first_response {
+                // 移除 tracker（避免重复计算）
+                self.request_trackers.remove(&cid);
+                
+                // 更新全局统计
+                self.global_stats.successful_requests += 1;
+                self.global_stats.total_bytes_received += block_size as u64;
+            }
 
             // 计算速度并记录日志
             let speed_mbps = if elapsed_ms > 0 {
@@ -341,7 +351,8 @@ where
             };
 
             tracing::info!(
-                "✓ 接收 CID {} 从节点 {} | {:.2} MB | {} ms | {:.2} MB/s | 评分: {:.2} | {}",
+                "{} 接收 CID {} 从节点 {} | {:.2} MB | {} ms | {:.2} MB/s | 评分: {:.2} | {}",
+                if is_first_response { "✓" } else { "⟳" },  // ⟳ 表示重复响应
                 cid,
                 peer,
                 block_size as f64 / (1024.0 * 1024.0),
@@ -354,7 +365,7 @@ where
             // 检查 wantlist 并处理查询响应
             if !self.wantlist.remove(&cid) {
                 debug_assert!(!self.cid_to_queries.contains_key(&cid));
-                tracing::debug!("收到未请求的 CID: {}, 已更新统计但跳过查询响应", cid);
+                tracing::debug!("收到重复的数据块，已更新节点统计但跳过查询响应");
                 continue;
             }
 
