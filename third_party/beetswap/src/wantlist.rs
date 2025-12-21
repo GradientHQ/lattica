@@ -89,11 +89,21 @@ impl<const S: usize> WantlistState<S> {
             .and_modify(|state| *state = WantReqState::GotBlock);
     }
 
-    /// 检查是否收到了 Have 响应
+    /// 检查是否收到了 Have 响应（用于候选节点识别）
+    /// 注意：只返回 GotHave 状态，不包含 SentWantBlock
+    /// 这确保了智能选择只在第一次选择时生效，避免多个节点都被发送 WantBlock
     pub(crate) fn has_received_have(&self, cid: &CidGeneric<S>) -> bool {
         matches!(
             self.req_state.get(cid),
-            Some(WantReqState::GotHave) | Some(WantReqState::SentWantBlock)
+            Some(WantReqState::GotHave)
+        )
+    }
+    
+    /// 检查是否已经发送了 WantBlock 请求
+    pub(crate) fn has_sent_want_block(&self, cid: &CidGeneric<S>) -> bool {
+        matches!(
+            self.req_state.get(cid),
+            Some(WantReqState::SentWantBlock)
         )
     }
 

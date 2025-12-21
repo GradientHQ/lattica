@@ -16,7 +16,7 @@ use libp2p_swarm::{
     ConnectionHandlerEvent, NotifyHandler, StreamProtocol, SubstreamProtocol, ToSwarm,
 };
 use smallvec::SmallVec;
-use tracing::{debug, trace};
+use tracing::{debug, info, trace};
 
 use crate::cid_prefix::CidPrefix;
 use crate::incoming_stream::ServerMessage;
@@ -95,8 +95,10 @@ impl<const S: usize> PeerWantlist<S> {
                 
                 if let Ok(cid) = CidGeneric::try_from(e.block) {
                     if e.wantType == WantType::Block {
+                        tracing::info!("收到 WantBlock 请求: CID={}", cid);
                         want_blocks.push(cid);
                     } else {
+                        tracing::info!("收到 WantHave 请求: CID={}", cid);
                         want_haves.push(cid);
                     }
                 }
@@ -132,6 +134,7 @@ impl<const S: usize> PeerWantlist<S> {
         for (_, cid, want_type) in additions {
             if want_type == WantType::Block {
                 // WantBlock: 添加到 wantlist，发送完整数据
+                tracing::info!("收到 WantBlock 请求(增量): CID={}", cid);
                 if self.0.len() >= MAX_WANTLIST_ENTRIES_PER_PEER {
                     break;
                 }
@@ -140,6 +143,7 @@ impl<const S: usize> PeerWantlist<S> {
                 }
             } else {
                 // WantHave: 只响应 BlockPresence
+                tracing::info!("收到 WantHave 请求(增量): CID={}", cid);
                 want_haves.push(cid);
             }
         }
@@ -223,7 +227,7 @@ where
 
         let (want_blocks, want_haves, removals) = wantlist.process_wantlist(msg.wantlist);
 
-        debug!(
+        info!(
             "updating local wantlist for {peer}: WantBlock={}, WantHave={}, removed={}",
             want_blocks.len(),
             want_haves.len(),
@@ -260,7 +264,19 @@ where
     }
 
     pub(crate) fn new_blocks_available(&mut self, blocks: Vec<BlockWithCid<S>>) {
-        self.outgoing_queue.extend(blocks);
+        // 只有明确收到 WantBlock 请求的节点才会收到这些数据
+        // 不能直接发送给所有收到 WantHave 的节点
+        for (cid, data) in blocks {
+            // 检查是否有节点在等待这个 CID (通过 WantBlock 请求)
+            if self.peers_waiting_for_cid.contains_key(&cid) {
+                info!("🔹 新数据可用，准备发送: CID={}, Size={:.2}MB", 
+                      cid, data.len() as f64 / (1024.0 * 1024.0));
+                self.outgoing_queue.push_back((cid, data));
+            } else {
+                // 没有节点通过 WantBlock 请求这个 CID，不发送
+                debug!("新数据可用但无节点明确请求: CID={}", cid);
+            }
+        }
     }
 
     pub(crate) fn new_connection_handler(&mut self, peer: PeerId) -> ServerConnectionHandler<S> {
@@ -284,12 +300,17 @@ where
 
         while let Some((cid, data)) = self.outgoing_queue.pop_front() {
             let Some(peers_waiting) = self.peers_waiting_for_cid.remove(&cid) else {
+                debug!("⚠️ CID {} 在队列中但没有等待的节点，跳过发送", cid);
                 continue;
             };
 
-            for peer in peers_waiting {
+            info!("📦 准备发送数据块: CID={}, Size={:.2}MB, 接收节点数: {}", 
+                  cid, data.len() as f64 / (1024.0 * 1024.0), peers_waiting.len());
+
+            for (idx, peer) in peers_waiting.iter().enumerate() {
+                info!("  └─ 接收节点 #{}: {}", idx + 1, peer);
                 blocks_ready_for_peer
-                    .entry(peer)
+                    .entry(peer.clone())
                     .or_default()
                     .push((CidPrefix::from_cid(&cid).to_bytes(), data.clone()))
             }
@@ -324,7 +345,8 @@ where
                     debug!("Cid {cid} not in blockstore for {peer}");
                 }
                 Ok(Some(data)) => {
-                    trace!("Cid {cid} for {peer} present in blockstore");
+                    let size_mb = data.len() as f64 / (1024.0 * 1024.0);
+                    info!("🔹 准备发送完整数据块: CID={}, Size={:.2}MB, To={}", cid, size_mb, peer);
                     self.outgoing_queue.push_back((cid, data));
                 }
                 Err(e) => {
@@ -342,7 +364,7 @@ where
             match result.data {
                 Ok(None) => {
                     // CID 不存在，发送 DontHave
-                    debug!("Cid {cid} not in blockstore for {peer}, sending DontHave");
+                    info!("📤 发送 DontHave: CID={}, To={}", cid, peer);
                     presences.push(ProtoBlockPresence {
                         cid: cid.to_bytes(),
                         type_pb: BlockPresenceType::DontHave,
@@ -350,7 +372,7 @@ where
                 }
                 Ok(Some(_)) => {
                     // CID 存在，发送 Have
-                    trace!("Cid {cid} present in blockstore for {peer}, sending Have");
+                    info!("📤 发送 Have: CID={}, To={}", cid, peer);
                     presences.push(ProtoBlockPresence {
                         cid: cid.to_bytes(),
                         type_pb: BlockPresenceType::Have,

@@ -403,9 +403,21 @@ where
 
         // ===== 新增：智能节点选择逻辑 =====
         // 第一步：识别哪些 CID 已经收到 Have 响应，准备进入 WantBlock 阶段
+        // 同时统计已经发送 WantBlock 的节点数量，避免重复发送
         let mut cid_to_candidates: FnvHashMap<CidGeneric<S>, Vec<PeerId>> = FnvHashMap::default();
+        let mut cid_already_sent_count: FnvHashMap<CidGeneric<S>, usize> = FnvHashMap::default();
         
         for cid in &self.wantlist.cids {
+            // 统计已经发送 WantBlock 的节点数量
+            let already_sent: usize = self
+                .peers
+                .iter()
+                .filter(|(_, state)| state.wantlist.has_sent_want_block(cid))
+                .count();
+            
+            cid_already_sent_count.insert(*cid, already_sent);
+            
+            // 只收集还没发送 WantBlock 的候选节点（GotHave 状态）
             let candidates: Vec<PeerId> = self
                 .peers
                 .iter()
@@ -422,6 +434,22 @@ where
         let mut selected_peers_for_cid: FnvHashMap<CidGeneric<S>, Vec<PeerId>> = FnvHashMap::default();
         
         for (cid, candidate_peers) in &cid_to_candidates {
+            // 检查是否已经发送了足够数量的 WantBlock 请求
+            let already_sent = *cid_already_sent_count.get(cid).unwrap_or(&0);
+            let top_n = self.peer_selection_config.top_n;
+            
+            if already_sent >= top_n {
+                // 已经发送了足够的 WantBlock 请求，不需要再选择新节点
+                debug!(
+                    "CID {} - 已发送 {} 个 WantBlock 请求，达到 top_n={} 上限，跳过选择",
+                    cid, already_sent, top_n
+                );
+                continue;
+            }
+            
+            // 还需要选择的节点数量
+            let need_to_select = top_n - already_sent;
+            
             let candidates_with_metrics: FnvHashMap<PeerId, &PeerMetrics> = candidate_peers
                 .iter()
                 .filter_map(|peer_id| {
@@ -433,17 +461,21 @@ where
                 continue;
             }
 
-            // 使用智能选择器选择 top N 节点
+            // 使用智能选择器选择节点（限制选择数量）
+            let mut temp_config = self.peer_selection_config.clone();
+            temp_config.top_n = need_to_select;
             let selected = PeerSelector::select_top_peers(
                 &candidates_with_metrics,
-                &self.peer_selection_config,
+                &temp_config,
             );
 
             debug!(
-                "CID {} - 候选节点: {}, 选中节点: {} 个",
+                "CID {} - 已发送: {}, 候选节点: {}, 新选中: {} 个 (top_n={})",
                 cid,
+                already_sent,
                 candidates_with_metrics.len(),
-                selected.len()
+                selected.len(),
+                top_n
             );
 
             // 调试：打印节点排名
