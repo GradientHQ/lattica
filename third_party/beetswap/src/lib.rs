@@ -305,6 +305,7 @@ pub enum ToBehaviourEvent<const S: usize> {
 pub enum ToHandlerEvent {
     SendWantlist(ProtoWantlist),
     QueueOutgoingMessages(Vec<(Vec<u8>, Vec<u8>)>),
+    QueueOutgoingPresences(Vec<proto::message::mod_Message::BlockPresence>),
 }
 
 #[doc(hidden)]
@@ -346,6 +347,9 @@ impl<const MAX_MULTIHASH_SIZE: usize> ConnectionHandler for ConnHandler<MAX_MULT
             }
             ToHandlerEvent::QueueOutgoingMessages(data) => {
                 self.server_handler.queue_messages(data);
+            }
+            ToHandlerEvent::QueueOutgoingPresences(presences) => {
+                self.server_handler.queue_presences(presences);
             }
         }
     }

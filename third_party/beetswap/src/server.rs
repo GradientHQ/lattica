@@ -22,7 +22,9 @@ use crate::cid_prefix::CidPrefix;
 use crate::incoming_stream::ServerMessage;
 use crate::message::Codec;
 use crate::proto::message::{
-    mod_Message::Block as ProtoBlock, mod_Message::Wantlist as ProtoWantlist, Message,
+    mod_Message::Block as ProtoBlock, mod_Message::BlockPresence as ProtoBlockPresence,
+    mod_Message::BlockPresenceType, mod_Message::Wantlist as ProtoWantlist, 
+    mod_Message::mod_Wantlist::WantType, Message,
 };
 use crate::utils::{box_future, stream_protocol, BoxFuture};
 use crate::{Event, Result, StreamRequester, ToBehaviourEvent, ToHandlerEvent};
@@ -43,8 +45,10 @@ where
     store: Arc<B>,
     /// list of CIDs each connected peer is waiting for
     peers_wantlists: FnvHashMap<PeerId, PeerWantlist<S>>,
-    /// list of peers that wait for particular CID
+    /// list of peers that wait for particular CID (WantBlock requests)
     peers_waiting_for_cid: FnvHashMap<CidGeneric<S>, SmallVec<[Arc<PeerId>; 1]>>,
+    /// list of peers that need BlockPresence response for CIDs (WantHave requests)
+    peers_wanting_presence: FnvHashMap<CidGeneric<S>, SmallVec<[Arc<PeerId>; 1]>>,
     /// list of blocks received from blockstore or network, that connected peers may be waiting for
     outgoing_queue: VecDeque<BlockWithCid<S>>,
     /// list of events to be sent back to swarm when poll is called
@@ -55,6 +59,7 @@ where
 
 enum TaskResult<const S: usize> {
     Get(Arc<PeerId>, Vec<GetCidResult<S>>),
+    GetPresence(Arc<PeerId>, Vec<GetCidResult<S>>),
 }
 
 struct GetCidResult<const S: usize> {
@@ -66,25 +71,41 @@ struct GetCidResult<const S: usize> {
 struct PeerWantlist<const S: usize>(FnvHashSet<CidGeneric<S>>);
 
 impl<const S: usize> PeerWantlist<S> {
-    /// Updates peers wantlist according to received message. Returns tuple with CIDs added and
-    /// CIDs removed from wantlist.
+    /// Updates peers wantlist according to received message. 
+    /// 
+    /// Returns tuple with:
+    /// - CIDs for WantBlock requests (需要发送完整数据)
+    /// - CIDs for WantHave requests (只需发送 BlockPresence)
+    /// - CIDs removed from wantlist
+    /// 
+    /// 重要：只有 WantBlock 类型的请求才会被添加到 wantlist 并触发数据发送。
+    /// WantHave 类型的请求会单独返回，只响应 BlockPresence。
     fn process_wantlist(
         &mut self,
         wantlist: ProtoWantlist,
-    ) -> (Vec<CidGeneric<S>>, Vec<CidGeneric<S>>) {
+    ) -> (Vec<CidGeneric<S>>, Vec<CidGeneric<S>>, Vec<CidGeneric<S>>) {
         if wantlist.full {
-            let wanted_cids = wantlist
-                .entries
-                .into_iter()
-                .filter_map(|e| {
-                    if e.cancel {
-                        return None;
+            let mut want_blocks = Vec::new();
+            let mut want_haves = Vec::new();
+            
+            for e in wantlist.entries {
+                if e.cancel {
+                    continue;
+                }
+                
+                if let Ok(cid) = CidGeneric::try_from(e.block) {
+                    if e.wantType == WantType::Block {
+                        want_blocks.push(cid);
+                    } else {
+                        want_haves.push(cid);
                     }
-                    CidGeneric::try_from(e.block).ok()
-                })
-                .collect();
-
-            return self.wantlist_replace(wanted_cids);
+                }
+            }
+            
+            let wanted_cids: FnvHashSet<_> = want_blocks.iter().copied().collect();
+            let (additions, removals) = self.wantlist_replace(wanted_cids);
+            
+            return (additions, want_haves, removals);
         }
 
         let (cancels, additions): (Vec<_>, Vec<_>) = wantlist
@@ -92,30 +113,38 @@ impl<const S: usize> PeerWantlist<S> {
             .into_iter()
             .filter_map(|e| {
                 CidGeneric::<S>::try_from(e.block)
-                    .map(|cid| (e.cancel, cid))
+                    .map(|cid| (e.cancel, cid, e.wantType))
                     .ok()
             })
-            .partition(|(cancel, _cid)| *cancel);
+            .partition(|(cancel, _cid, _want_type)| *cancel);
 
         // process cancels first, so that we truncate wantlist correctly
         let mut removed = Vec::with_capacity(cancels.len());
-        for (_, cid) in cancels {
+        for (_, cid, _) in cancels {
             if self.0.remove(&cid) {
                 removed.push(cid);
             }
         }
 
-        let mut added = Vec::with_capacity(additions.len());
-        for (_, cid) in additions {
-            if self.0.len() >= MAX_WANTLIST_ENTRIES_PER_PEER {
-                break;
-            }
-            if self.0.insert(cid) {
-                added.push(cid)
+        let mut want_blocks = Vec::new();
+        let mut want_haves = Vec::new();
+        
+        for (_, cid, want_type) in additions {
+            if want_type == WantType::Block {
+                // WantBlock: 添加到 wantlist，发送完整数据
+                if self.0.len() >= MAX_WANTLIST_ENTRIES_PER_PEER {
+                    break;
+                }
+                if self.0.insert(cid) {
+                    want_blocks.push(cid)
+                }
+            } else {
+                // WantHave: 只响应 BlockPresence
+                want_haves.push(cid);
             }
         }
 
-        (added, removed)
+        (want_blocks, want_haves, removed)
     }
 
     fn wantlist_replace(
@@ -144,6 +173,7 @@ where
             store,
             peers_wantlists: Default::default(),
             peers_waiting_for_cid: Default::default(),
+            peers_wanting_presence: Default::default(),
             tasks: Default::default(),
             outgoing_queue: Default::default(),
             outgoing_event_queue: Default::default(),
@@ -156,6 +186,15 @@ where
         self.tasks.push(box_future(async move {
             let result = get_multiple_cids_from_store(store, cids).await;
             TaskResult::Get(peer, result)
+        }));
+    }
+
+    fn schedule_store_check_presence(&mut self, peer: Arc<PeerId>, cids: Vec<CidGeneric<S>>) {
+        let store = self.store.clone();
+
+        self.tasks.push(box_future(async move {
+            let result = get_multiple_cids_from_store(store, cids).await;
+            TaskResult::GetPresence(peer, result)
         }));
     }
 
@@ -182,22 +221,38 @@ where
             return; // entry should have been created in `new_connection_handler`
         };
 
-        let (additions, removals) = wantlist.process_wantlist(msg.wantlist);
+        let (want_blocks, want_haves, removals) = wantlist.process_wantlist(msg.wantlist);
 
         debug!(
-            "updating local wantlist for {peer}: added {}, removed {}",
-            additions.len(),
+            "updating local wantlist for {peer}: WantBlock={}, WantHave={}, removed={}",
+            want_blocks.len(),
+            want_haves.len(),
             removals.len()
         );
 
         let peer = Arc::new(peer);
-        for cid in &additions {
+        
+        // 处理 WantBlock 请求：发送完整数据
+        for cid in &want_blocks {
             self.peers_waiting_for_cid
                 .entry(*cid)
                 .or_default()
                 .push(peer.clone());
         }
-        self.schedule_store_get(peer.clone(), additions);
+        if !want_blocks.is_empty() {
+            self.schedule_store_get(peer.clone(), want_blocks);
+        }
+        
+        // 处理 WantHave 请求：只响应 BlockPresence
+        for cid in &want_haves {
+            self.peers_wanting_presence
+                .entry(*cid)
+                .or_default()
+                .push(peer.clone());
+        }
+        if !want_haves.is_empty() {
+            self.schedule_store_check_presence(peer.clone(), want_haves);
+        }
 
         for cid in removals {
             self.cancel_request(peer.clone(), cid);
@@ -215,6 +270,7 @@ where
             protocol: self.protocol.clone(),
             sink: Default::default(),
             pending_outgoing_messages: None,
+            pending_outgoing_presences: None,
         }
     }
 
@@ -278,6 +334,50 @@ where
         }
     }
 
+    fn process_store_presence_results(&mut self, peer: Arc<PeerId>, results: Vec<GetCidResult<S>>) {
+        let mut presences = Vec::new();
+        
+        for result in results {
+            let cid = result.cid;
+            match result.data {
+                Ok(None) => {
+                    // CID 不存在，发送 DontHave
+                    debug!("Cid {cid} not in blockstore for {peer}, sending DontHave");
+                    presences.push(ProtoBlockPresence {
+                        cid: cid.to_bytes(),
+                        type_pb: BlockPresenceType::DontHave,
+                    });
+                }
+                Ok(Some(_)) => {
+                    // CID 存在，发送 Have
+                    trace!("Cid {cid} present in blockstore for {peer}, sending Have");
+                    presences.push(ProtoBlockPresence {
+                        cid: cid.to_bytes(),
+                        type_pb: BlockPresenceType::Have,
+                    });
+                }
+                Err(e) => {
+                    debug!("Fetching {cid} from blockstore failed: {e}, sending DontHave");
+                    presences.push(ProtoBlockPresence {
+                        cid: cid.to_bytes(),
+                        type_pb: BlockPresenceType::DontHave,
+                    });
+                }
+            }
+            
+            // 清理 peers_wanting_presence
+            self.peers_wanting_presence.remove(&cid);
+        }
+        
+        if !presences.is_empty() {
+            self.outgoing_event_queue.push_back(ToSwarm::NotifyHandler {
+                peer_id: *peer,
+                handler: NotifyHandler::Any,
+                event: ToHandlerEvent::QueueOutgoingPresences(presences),
+            });
+        }
+    }
+
     pub(crate) fn poll(&mut self, cx: &mut Context) -> Poll<ToSwarm<Event, ToHandlerEvent>> {
         loop {
             if let Some(ev) = self.outgoing_event_queue.pop_front() {
@@ -287,6 +387,7 @@ where
             if let Poll::Ready(Some(task_result)) = self.tasks.poll_next_unpin(cx) {
                 match task_result {
                     TaskResult::Get(peer, results) => self.process_store_get_results(peer, results),
+                    TaskResult::GetPresence(peer, results) => self.process_store_presence_results(peer, results),
                 }
                 continue;
             }
@@ -304,6 +405,7 @@ pub(crate) struct ServerConnectionHandler<const S: usize> {
     protocol: StreamProtocol,
     sink: SinkState,
     pending_outgoing_messages: Option<Vec<ProtoBlock>>,
+    pending_outgoing_presences: Option<Vec<ProtoBlockPresence>>,
 }
 
 impl<const S: usize> fmt::Debug for ServerConnectionHandler<S> {
@@ -337,6 +439,12 @@ impl<const S: usize> ServerConnectionHandler<S> {
             .extend(block_list);
     }
 
+    pub(crate) fn queue_presences(&mut self, presences: Vec<ProtoBlockPresence>) {
+        self.pending_outgoing_presences
+            .get_or_insert_with(|| Vec::with_capacity(presences.len()))
+            .extend(presences);
+    }
+
     fn open_new_substream(
         &mut self,
     ) -> Poll<
@@ -359,28 +467,34 @@ impl<const S: usize> ServerConnectionHandler<S> {
         ConnectionHandlerEvent<ReadyUpgrade<StreamProtocol>, StreamRequester, ToBehaviourEvent<S>>,
     > {
         loop {
-            match (&mut self.pending_outgoing_messages, &mut self.sink) {
-                (_, SinkState::Requested) => return Poll::Pending,
-                (None, SinkState::None) => return Poll::Pending,
-                (None, SinkState::Ready(sink)) => {
-                    if ready!(sink.poll_flush_unpin(cx)).is_err() {
-                        self.close_sink_on_error("poll_flush_unpin");
+            // 检查是否有待发送的消息
+            let has_messages = self.pending_outgoing_messages.is_some();
+            let has_presences = self.pending_outgoing_presences.is_some();
+            
+            match &mut self.sink {
+                SinkState::Requested => return Poll::Pending,
+                SinkState::None => {
+                    if has_messages || has_presences {
+                        return self.open_new_substream();
                     }
-
                     return Poll::Pending;
                 }
-                (Some(_), SinkState::None) => return self.open_new_substream(),
-                (pending_messages @ Some(_), SinkState::Ready(sink)) => {
+                SinkState::Ready(sink) => {
                     if ready!(sink.poll_flush_unpin(cx)).is_err() {
-                        self.close_sink_on_error("poll_flush_unpin before sending message");
+                        self.close_sink_on_error("poll_flush_unpin");
                         continue;
                     }
 
-                    let messages = pending_messages
-                        .take()
-                        .expect("pending_messages can't be None here");
+                    if !has_messages && !has_presences {
+                        return Poll::Pending;
+                    }
+
+                    let messages = self.pending_outgoing_messages.take().unwrap_or_default();
+                    let presences = self.pending_outgoing_presences.take().unwrap_or_default();
+                    
                     let message = Message {
                         payload: messages,
+                        blockPresences: presences,
                         ..Message::default()
                     };
 
