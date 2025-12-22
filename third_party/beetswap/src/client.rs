@@ -307,7 +307,7 @@ where
             // Get elapsed time from peer's request sent time, fallback to historical RTT
             let elapsed_ms = peer_state.wantlist.get_request_sent_time(&cid)
                 .map(|t| t.elapsed().as_millis() as u64)
-                .unwrap_or_else(|| peer_state.metrics.avg_rtt_ms.max(100.0) as u64);
+                .unwrap_or(100);
 
             // Record peer metrics
             peer_state.metrics.record_success(block_size, elapsed_ms);
@@ -536,7 +536,6 @@ where
                     failures: metrics.failures,
                     success_rate: metrics.success_rate(),
                     avg_speed: metrics.avg_speed(),
-                    avg_rtt_ms: metrics.avg_rtt_ms,
                 }
             })
             .collect();

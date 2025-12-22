@@ -295,7 +295,6 @@ class Lattica:
             - failures: Number of failures
             - success_rate: Success rate (0.0-1.0)
             - avg_speed: Average speed in bytes/sec
-            - avg_rtt_ms: Average RTT in milliseconds
         """
         try:
             return self._lattica_instance.get_bitswap_peer_rankings()
@@ -328,14 +327,14 @@ class Lattica:
             rankings = self.get_bitswap_peer_rankings()
             if rankings:
                 print(f"\nTop {min(len(rankings), 10)} Peers:")
-                print(f"  {'#':<3} {'Peer ID':<54} {'Score':>7} {'Success':>8} {'Fail':>5} {'Rate':>7} {'Speed':>12} {'RTT':>8}")
-                print(f"  {'-'*3} {'-'*54} {'-'*7} {'-'*8} {'-'*5} {'-'*7} {'-'*12} {'-'*8}")
+                print(f"  {'#':<3} {'Peer ID':<54} {'Score':>7} {'Success':>8} {'Fail':>5} {'Rate':>7} {'Speed':>12}")
+                print(f"  {'-'*3} {'-'*54} {'-'*7} {'-'*8} {'-'*5} {'-'*7} {'-'*12}")
                 for i, peer in enumerate(rankings[:10], 1):
                     peer_id = peer['peer_id']
                     display_id = peer_id[:52] + ".." if len(peer_id) > 54 else peer_id
                     speed_mb = peer['avg_speed'] / (1024 * 1024)
                     rate_pct = peer['success_rate'] * 100
-                    print(f"  {i:<3} {display_id:<54} {peer['score']:>7.2f} {peer['blocks_received']:>8} {peer['failures']:>5} {rate_pct:>6.1f}% {speed_mb:>9.2f}MB/s {peer['avg_rtt_ms']:>6.0f}ms")
+                    print(f"  {i:<3} {display_id:<54} {peer['score']:>7.2f} {peer['blocks_received']:>8} {peer['failures']:>5} {rate_pct:>6.1f}% {speed_mb:>9.2f}MB/s")
             else:
                 print("\n  No peer data available.")
             print(f"{'='*100}\n")

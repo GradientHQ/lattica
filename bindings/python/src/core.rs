@@ -609,7 +609,6 @@ impl LatticaSDK {
                         dict.set_item("failures", detail.failures)?;
                         dict.set_item("success_rate", detail.success_rate)?;
                         dict.set_item("avg_speed", detail.avg_speed)?;
-                        dict.set_item("avg_rtt_ms", detail.avg_rtt_ms)?;
                         list.append(dict)?;
                     }
                     Ok(list.into_py_any(py)?)

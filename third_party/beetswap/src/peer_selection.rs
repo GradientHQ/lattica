@@ -18,8 +18,6 @@ pub struct PeerMetrics {
     pub recent_speeds: std::collections::VecDeque<f64>,
     /// Last update time
     pub last_updated: web_time::Instant,
-    /// Average RTT (ms)
-    pub avg_rtt_ms: f64,
     /// Consecutive successes
     pub consecutive_successes: u32,
     /// Consecutive failures
@@ -35,7 +33,6 @@ impl Default for PeerMetrics {
             total_time_ms: 0,
             recent_speeds: std::collections::VecDeque::with_capacity(10),
             last_updated: web_time::Instant::now(),
-            avg_rtt_ms: 0.0,
             consecutive_successes: 0,
             consecutive_failures: 0,
         }
@@ -62,24 +59,25 @@ impl PeerMetrics {
 
     /// Calculate composite score (0.0 - 100.0)
     pub fn calculate_score(&self) -> f64 {
-        const SPEED_WEIGHT: f64 = 0.4;
-        const SUCCESS_RATE_WEIGHT: f64 = 0.3;
-        const RTT_WEIGHT: f64 = 0.2;
-        const STABILITY_WEIGHT: f64 = 0.1;
+        const SPEED_WEIGHT: f64 = 0.5;
+        const SUCCESS_RATE_WEIGHT: f64 = 0.35;
+        const STABILITY_WEIGHT: f64 = 0.15;
 
-        // Speed score (normalized to 0-100)
-        let speed_mb_s = self.avg_speed() / (1024.0 * 1024.0);
-        let speed_score = (speed_mb_s.min(100.0) / 100.0) * 100.0;
+        // New peer gets exploration bonus
+        if self.blocks_received == 0 && self.failures == 0 {
+            return 55.0; // Slightly above average to encourage trying new peers
+        }
+
+        // Use log-based speed normalization (works for any speed range)
+        // 1 KB/s -> ~30, 100 KB/s -> ~50, 1 MB/s -> ~67, 10 MB/s -> ~83, 100 MB/s -> 100
+        let speed_score = if self.avg_speed() > 0.0 {
+            ((self.avg_speed().log10() - 3.0) / 5.0 * 100.0).clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
 
         // Success rate score (0-100)
         let success_score = self.success_rate() * 100.0;
-
-        // RTT score (lower is better, normalized to 0-100)
-        let rtt_score = if self.avg_rtt_ms > 0.0 {
-            ((1000.0 - self.avg_rtt_ms.min(1000.0)) / 1000.0) * 100.0
-        } else {
-            50.0
-        };
 
         // Stability score (based on consecutive successes)
         let stability_score = if self.consecutive_failures > 3 {
@@ -88,13 +86,12 @@ impl PeerMetrics {
             (self.consecutive_successes.min(10) as f64 / 10.0) * 100.0
         };
 
-        // Time decay factor
+        // Progressive time decay (smoother than binary 1.0/0.8)
         let elapsed = self.last_updated.elapsed().as_secs();
-        let decay_factor = if elapsed > 300 { 0.8 } else { 1.0 };
+        let decay_factor = 1.0 - (elapsed as f64 / 600.0).min(0.3); // 0-600s: 1.0->0.7
 
         let score = (speed_score * SPEED_WEIGHT
             + success_score * SUCCESS_RATE_WEIGHT
-            + rtt_score * RTT_WEIGHT
             + stability_score * STABILITY_WEIGHT)
             * decay_factor;
 
@@ -117,13 +114,6 @@ impl PeerMetrics {
             }
             self.recent_speeds.push_back(speed);
         }
-
-        // Update average RTT using exponential moving average
-        if self.avg_rtt_ms == 0.0 {
-            self.avg_rtt_ms = duration_ms as f64;
-        } else {
-            self.avg_rtt_ms = self.avg_rtt_ms * 0.8 + duration_ms as f64 * 0.2;
-        }
     }
 
     /// Record failure
@@ -144,7 +134,6 @@ pub struct PeerDetail {
     pub failures: u64,
     pub success_rate: f64,
     pub avg_speed: f64,
-    pub avg_rtt_ms: f64,
 }
 
 /// Peer selection configuration
@@ -255,13 +244,12 @@ impl PeerSelector {
         tracing::debug!("Peer rankings:");
         for (i, (peer_id, score, metrics)) in scored_peers.iter().enumerate() {
             tracing::debug!(
-                "#{} {} | score: {:.2} | rate: {:.1}% | speed: {:.2} MB/s | rtt: {:.0}ms",
+                "#{} {} | score: {:.2} | rate: {:.1}% | speed: {:.2} MB/s",
                 i + 1,
                 peer_id,
                 score,
                 metrics.success_rate() * 100.0,
-                metrics.avg_speed() / (1024.0 * 1024.0),
-                metrics.avg_rtt_ms
+                metrics.avg_speed() / (1024.0 * 1024.0)
             );
         }
     }
