@@ -24,7 +24,7 @@ use web_time::Instant;
 
 use crate::incoming_stream::ClientMessage;
 use crate::message::Codec;
-use crate::peer_selection::{GlobalStats, PeerDetail, PeerMetrics, PeerSelectionConfig, PeerSelector, RequestPhase, RequestTracker};
+use crate::peer_selection::{GlobalStats, PeerDetail, PeerMetrics, PeerSelectionConfig, PeerSelector};
 use crate::proto::message::mod_Message::{BlockPresenceType, Wantlist as ProtoWantlist};
 use crate::proto::message::Message;
 use crate::utils::{box_future, convert_cid, stream_protocol, BoxFuture};
@@ -81,8 +81,6 @@ where
     new_blocks: Vec<(CidGeneric<S>, Vec<u8>)>,
     /// Peer selection config
     peer_selection_config: PeerSelectionConfig,
-    /// Request trackers
-    request_trackers: FnvHashMap<CidGeneric<S>, RequestTracker<S>>,
     /// Global stats
     global_stats: GlobalStats,
 }
@@ -159,7 +157,6 @@ where
             send_full_timer: Delay::new(SEND_FULL_INTERVAL),
             new_blocks: Vec::new(),
             peer_selection_config: PeerSelectionConfig::default(),
-            request_trackers: FnvHashMap::default(),
             global_stats: GlobalStats::default(),
         }
     }
@@ -305,27 +302,18 @@ where
         // truncate the data, maybe even in the `message::Codec` level
         for (cid, block) in msg.blocks {
             let block_size = block.len();
-            
             let is_first_response = self.wantlist.cids.contains(&cid);
-            
-            // Get timing info from tracker
-            let (elapsed_ms, tracker_info) = if let Some(tracker) = self.request_trackers.get(&cid) {
-                let elapsed = tracker.start_time.elapsed();
-                let phase = match tracker.request_phase {
-                    RequestPhase::Probing => "probe",
-                    RequestPhase::Fetching => "fetch",
-                };
-                (elapsed.as_millis() as u64, format!("tracked({})", phase))
-            } else {
-                (0, "no_tracker".to_string())
-            };
+
+            // Get elapsed time from peer's request sent time, fallback to historical RTT
+            let elapsed_ms = peer_state.wantlist.get_request_sent_time(&cid)
+                .map(|t| t.elapsed().as_millis() as u64)
+                .unwrap_or_else(|| peer_state.metrics.avg_rtt_ms.max(100.0) as u64);
 
             // Record peer metrics
             peer_state.metrics.record_success(block_size, elapsed_ms);
 
             // Update global stats only for first response
             if is_first_response {
-                self.request_trackers.remove(&cid);
                 self.global_stats.successful_requests += 1;
                 self.global_stats.total_bytes_received += block_size as u64;
             }
@@ -337,15 +325,14 @@ where
             };
 
             tracing::info!(
-                "{} CID {} from {} | {:.2} MB | {} ms | {:.2} MB/s | score: {:.2} | {}",
+                "{} CID {} from {} | {:.2} MB | {} ms | {:.2} MB/s | score: {:.2}",
                 if is_first_response { "recv" } else { "dup" },
                 cid,
                 peer,
                 block_size as f64 / (1024.0 * 1024.0),
                 elapsed_ms,
                 speed_mbps,
-                peer_state.metrics.calculate_score(),
-                tracker_info
+                peer_state.metrics.calculate_score()
             );
             
             if !self.wantlist.remove(&cid) {
@@ -438,26 +425,6 @@ where
                 "CID {} - sent: {}, candidates: {}, selected: {} (top_n={})",
                 cid, already_sent, candidates_with_metrics.len(), selected.len(), top_n
             );
-
-            // Update request tracker
-            let tracker = self.request_trackers.entry(*cid).or_insert_with(|| {
-                RequestTracker {
-                    cid: *cid,
-                    start_time: Instant::now(),
-                    want_block_sent_time: None,
-                    peers_sent: FnvHashSet::default(),
-                    request_phase: RequestPhase::Probing,
-                }
-            });
-            
-            if tracker.want_block_sent_time.is_none() {
-                tracker.want_block_sent_time = Some(Instant::now());
-            }
-            tracker.request_phase = RequestPhase::Fetching;
-
-            for peer_id in &selected {
-                tracker.peers_sent.insert(*peer_id);
-            }
 
             selected_peers_for_cid.insert(*cid, selected);
         }
@@ -582,43 +549,6 @@ where
         &self.global_stats
     }
 
-    /// Handle request timeout or failure
-    #[allow(dead_code)]
-    pub(crate) fn handle_request_failure(&mut self, cid: &CidGeneric<S>, peer: Option<PeerId>) {
-        if let Some(tracker) = self.request_trackers.remove(cid) {
-            self.global_stats.failed_requests += 1;
-
-            if let Some(peer_id) = peer {
-                if let Some(peer_state) = self.peers.get_mut(&peer_id) {
-                    peer_state.metrics.record_failure();
-                    tracing::warn!("CID {} from {} failed | new score: {:.2}", cid, peer_id, peer_state.metrics.calculate_score());
-                }
-            } else {
-                for peer_id in &tracker.peers_sent {
-                    if let Some(peer_state) = self.peers.get_mut(peer_id) {
-                        peer_state.metrics.record_failure();
-                    }
-                }
-            }
-        }
-    }
-
-    /// Cleanup stale request trackers
-    #[allow(dead_code)]
-    pub(crate) fn cleanup_stale_trackers(&mut self) {
-        let now = Instant::now();
-        let stale_cids: Vec<_> = self.request_trackers.iter()
-            .filter(|(_, tracker)| now.duration_since(tracker.start_time).as_secs() > 60)
-            .map(|(cid, _)| *cid)
-            .collect();
-
-        for cid in stale_cids {
-            self.request_trackers.remove(&cid);
-            self.global_stats.failed_requests += 1;
-            tracing::warn!("Stale request cleanup: CID {} timed out", cid);
-        }
-    }
-
     /// This is polled by `Behaviour`, which is polled by `Swarm`.
     pub(crate) fn poll(&mut self, cx: &mut Context) -> Poll<ToSwarm<Event, ToHandlerEvent>> {
         loop {
@@ -653,17 +583,6 @@ where
                     TaskResult::Get(query_id, cid, Ok(None)) => {
                         self.wantlist.insert(cid);
                         self.cid_to_queries.entry(cid).or_default().push(query_id);
-                        
-                        // Create RequestTracker to record precise timing
-                        self.request_trackers.entry(cid).or_insert_with(|| {
-                            RequestTracker {
-                                cid,
-                                start_time: Instant::now(),
-                                want_block_sent_time: None,
-                                peers_sent: FnvHashSet::default(),
-                                request_phase: RequestPhase::Probing,
-                            }
-                        });
                     }
 
                     // Blockstore error

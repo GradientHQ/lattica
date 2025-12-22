@@ -1,4 +1,3 @@
-use cid::CidGeneric;
 use fnv::FnvHashMap;
 use libp2p_identity::PeerId;
 use rand::seq::SliceRandom;
@@ -266,29 +265,6 @@ impl PeerSelector {
             );
         }
     }
-}
-
-/// Request tracker
-#[derive(Debug)]
-pub struct RequestTracker<const S: usize> {
-    /// Request CID
-    pub cid: CidGeneric<S>,
-    /// Request start time
-    pub start_time: web_time::Instant,
-    /// WantBlock sent time
-    pub want_block_sent_time: Option<web_time::Instant>,
-    /// Peers that received WantBlock
-    pub peers_sent: fnv::FnvHashSet<PeerId>,
-    /// Request phase
-    pub request_phase: RequestPhase,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum RequestPhase {
-    /// Phase 1: WantHave probing
-    Probing,
-    /// Phase 2: WantBlock fetching
-    Fetching,
 }
 
 /// Global statistics
