@@ -895,28 +895,28 @@ impl Lattica {
         Ok(*nat)
     }
 
-    /// 配置 Bitswap 节点选择策略
+    /// Configure Bitswap peer selection strategy
     pub async fn configure_bitswap_peer_selection(&self, config: beetswap::PeerSelectionConfig) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         self.cmd.try_send(Command::ConfigureBitswapPeerSelection(config, tx))?;
         rx.await?
     }
 
-    /// 获取 Bitswap 全局统计
+    /// Get Bitswap global stats
     pub async fn get_bitswap_global_stats(&self) -> Result<beetswap::GlobalStats> {
         let (tx, rx) = oneshot::channel();
         self.cmd.try_send(Command::GetBitswapGlobalStats(tx))?;
         rx.await?
     }
 
-    /// 获取 Bitswap 节点评分排名
+    /// Get Bitswap peer rankings
     pub async fn get_bitswap_peer_rankings(&self) -> Result<Vec<(PeerId, f64)>> {
         let (tx, rx) = oneshot::channel();
         self.cmd.try_send(Command::GetBitswapPeerRankings(tx))?;
         rx.await?
     }
 
-    /// 打印 Bitswap 统计报告
+    /// Print Bitswap stats report
     pub fn print_bitswap_stats(&self) {
         self.cmd.try_send(Command::PrintBitswapStats).ok();
     }

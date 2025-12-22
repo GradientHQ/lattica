@@ -152,32 +152,32 @@ where
         self.client.cancel(query_id)
     }
 
-    /// 设置节点选择配置
+    /// Set peer selection configuration
     pub fn set_peer_selection_config(&mut self, config: PeerSelectionConfig) {
         self.client.set_peer_selection_config(config);
     }
 
-    /// 获取节点选择配置
+    /// Get peer selection configuration
     pub fn get_peer_selection_config(&self) -> &PeerSelectionConfig {
         self.client.get_peer_selection_config()
     }
 
-    /// 获取节点性能指标
+    /// Get performance metrics for a specific peer
     pub fn get_peer_metrics(&self, peer_id: &PeerId) -> Option<&PeerMetrics> {
         self.client.get_peer_metrics(peer_id)
     }
 
-    /// 获取所有节点的评分排名
+    /// Get score rankings for all peers
     pub fn get_peer_rankings(&self) -> Vec<(PeerId, f64)> {
         self.client.get_peer_rankings()
     }
 
-    /// 获取全局传输统计
+    /// Get global transfer statistics
     pub fn get_global_stats(&self) -> &GlobalStats {
         self.client.get_global_stats()
     }
 
-    /// 打印统计报告
+    /// Print statistics report
     pub fn print_stats_report(&self) {
         self.client.print_stats_report();
     }

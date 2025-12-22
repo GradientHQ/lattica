@@ -559,54 +559,26 @@ impl LatticaSDK {
         self.lattica.is_symmetric_nat().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{:?}", e)))
     }
 
-    /// 配置 Bitswap 节点选择策略
+    /// Configure Bitswap peer selection strategy
     #[pyo3(signature = (top_n = 3, enabled = true, min_peers = 2, enable_randomness = true))]
-    fn configure_bitswap_peer_selection(
-        &self,
-        top_n: usize,
-        enabled: bool,
-        min_peers: usize,
-        enable_randomness: bool,
-    ) -> PyResult<()> {
+    fn configure_bitswap_peer_selection(&self, top_n: usize, enabled: bool, min_peers: usize, enable_randomness: bool) -> PyResult<()> {
         Python::with_gil(|py| {
             py.allow_threads(|| {
                 self.runtime.block_on(async move {
-                    // 创建配置
-                    let config = beetswap::PeerSelectionConfig {
-                        top_n,
-                        enabled,
-                        min_peers,
-                        enable_randomness,
-                    };
-
-                    self.lattica
-                        .configure_bitswap_peer_selection(config)
-                        .await
-                        .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                                "Failed to configure bitswap peer selection: {:?}",
-                                e
-                            ))
-                        })
+                    let config = beetswap::PeerSelectionConfig { top_n, enabled, min_peers, enable_randomness };
+                    self.lattica.configure_bitswap_peer_selection(config).await
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{:?}", e)))
                 })
             })
         })
     }
 
-    /// 获取 Bitswap 全局统计信息
+    /// Get Bitswap global statistics
     fn get_bitswap_global_stats(&self, py: Python) -> PyResult<PyObject> {
         py.allow_threads(|| {
             self.runtime.block_on(async move {
-                let stats = self
-                    .lattica
-                    .get_bitswap_global_stats()
-                    .await
-                    .map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                            "Failed to get bitswap stats: {:?}",
-                            e
-                        ))
-                    })?;
+                let stats = self.lattica.get_bitswap_global_stats().await
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{:?}", e)))?;
 
                 Python::with_gil(|py| {
                     let dict = PyDict::new(py);
@@ -620,32 +592,20 @@ impl LatticaSDK {
         })
     }
 
-    /// 获取 Bitswap 节点评分排名
+    /// Get Bitswap peer rankings
     fn get_bitswap_peer_rankings(&self) -> PyResult<Vec<(String, f64)>> {
         Python::with_gil(|py| {
             py.allow_threads(|| {
                 self.runtime.block_on(async move {
-                    let rankings = self
-                        .lattica
-                        .get_bitswap_peer_rankings()
-                        .await
-                        .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                                "Failed to get bitswap peer rankings: {:?}",
-                                e
-                            ))
-                        })?;
-
-                    Ok(rankings
-                        .into_iter()
-                        .map(|(peer_id, score)| (peer_id.to_string(), score))
-                        .collect())
+                    let rankings = self.lattica.get_bitswap_peer_rankings().await
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{:?}", e)))?;
+                    Ok(rankings.into_iter().map(|(peer_id, score)| (peer_id.to_string(), score)).collect())
                 })
             })
         })
     }
 
-    /// 打印 Bitswap 统计报告
+    /// Print Bitswap stats report
     fn print_bitswap_stats(&self) -> PyResult<()> {
         self.lattica.print_bitswap_stats();
         Ok(())

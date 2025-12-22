@@ -260,27 +260,25 @@ class Lattica:
         min_peers: int = 2,
         enable_randomness: bool = True
     ) -> None:
-        """配置 Bitswap 节点选择策略
+        """Configure Bitswap peer selection strategy.
         
         Args:
-            top_n: 选择最优的 N 个节点
-            enabled: 是否启用智能选择
-            min_peers: 最小节点数阈值
-            enable_randomness: 是否启用随机性
+            top_n: Number of top peers to select
+            enabled: Enable smart selection
+            min_peers: Minimum peers threshold
+            enable_randomness: Enable randomness in selection
         """
         self._ensure_initialized()
         try:
-            return self._lattica_instance.configure_bitswap_peer_selection(
-                top_n, enabled, min_peers, enable_randomness
-            )
+            self._lattica_instance.configure_bitswap_peer_selection(top_n, enabled, min_peers, enable_randomness)
         except Exception as e:
             raise RuntimeError(f"Failed to configure bitswap peer selection: {e}")
 
     def get_bitswap_global_stats(self) -> dict:
-        """获取 Bitswap 全局统计信息
+        """Get Bitswap global statistics.
         
         Returns:
-            dict: 包含 total_requests, successful_requests, failed_requests, total_bytes_received
+            dict with total_requests, successful_requests, failed_requests, total_bytes_received
         """
         self._ensure_initialized()
         try:
@@ -289,10 +287,10 @@ class Lattica:
             raise RuntimeError(f"Failed to get bitswap global stats: {e}")
 
     def get_bitswap_peer_rankings(self) -> List[Tuple[str, float]]:
-        """获取 Bitswap 节点评分排名
+        """Get Bitswap peer rankings sorted by score.
         
         Returns:
-            List[Tuple[str, float]]: (peer_id, score) 元组列表，按评分降序排列
+            List of (peer_id, score) tuples sorted by score descending
         """
         self._ensure_initialized()
         try:
@@ -301,10 +299,10 @@ class Lattica:
             raise RuntimeError(f"Failed to get bitswap peer rankings: {e}")
 
     def print_bitswap_stats(self) -> None:
-        """打印 Bitswap 统计报告到日志"""
+        """Print Bitswap stats report to log."""
         self._ensure_initialized()
         try:
-            return self._lattica_instance.print_bitswap_stats()
+            self._lattica_instance.print_bitswap_stats()
         except Exception as e:
             raise RuntimeError(f"Failed to print bitswap stats: {e}")
 
