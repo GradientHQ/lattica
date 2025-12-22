@@ -205,7 +205,7 @@ where
 
         let (want_blocks, want_haves, removals) = wantlist.process_wantlist(msg.wantlist);
 
-        info!(
+        debug!(
             "updating local wantlist for {peer}: WantBlock={}, WantHave={}, removed={}",
             want_blocks.len(),
             want_haves.len(),
