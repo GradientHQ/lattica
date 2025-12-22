@@ -2,7 +2,7 @@ use lattica::{network, rpc, common};
 use beetswap;
 use std::sync::{Arc};
 use tokio::sync::{Mutex};
-use pyo3::{prelude::*, types::PyDict, IntoPyObjectExt};
+use pyo3::{prelude::*, types::{PyDict, PyList}, IntoPyObjectExt};
 use tokio::runtime::Runtime;
 use libp2p::{Multiaddr, PeerId};
 use async_trait::async_trait;
@@ -592,23 +592,30 @@ impl LatticaSDK {
         })
     }
 
-    /// Get Bitswap peer rankings
-    fn get_bitswap_peer_rankings(&self) -> PyResult<Vec<(String, f64)>> {
-        Python::with_gil(|py| {
-            py.allow_threads(|| {
-                self.runtime.block_on(async move {
-                    let rankings = self.lattica.get_bitswap_peer_rankings().await
-                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{:?}", e)))?;
-                    Ok(rankings.into_iter().map(|(peer_id, score)| (peer_id.to_string(), score)).collect())
+    /// Get Bitswap peer rankings with detailed metrics
+    fn get_bitswap_peer_rankings_detailed(&self, py: Python) -> PyResult<PyObject> {
+        py.allow_threads(|| {
+            self.runtime.block_on(async move {
+                let details = self.lattica.get_bitswap_peer_rankings().await
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{:?}", e)))?;
+                
+                Python::with_gil(|py| {
+                    let list = PyList::empty(py);
+                    for detail in details {
+                        let dict = PyDict::new(py);
+                        dict.set_item("peer_id", detail.peer_id)?;
+                        dict.set_item("score", detail.score)?;
+                        dict.set_item("blocks_received", detail.blocks_received)?;
+                        dict.set_item("failures", detail.failures)?;
+                        dict.set_item("success_rate", detail.success_rate)?;
+                        dict.set_item("avg_speed", detail.avg_speed)?;
+                        dict.set_item("avg_rtt_ms", detail.avg_rtt_ms)?;
+                        list.append(dict)?;
+                    }
+                    Ok(list.into_py_any(py)?)
                 })
             })
         })
-    }
-
-    /// Print Bitswap stats report
-    fn print_bitswap_stats(&self) -> PyResult<()> {
-        self.lattica.print_bitswap_stats();
-        Ok(())
     }
 }
 

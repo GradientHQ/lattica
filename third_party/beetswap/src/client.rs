@@ -24,7 +24,7 @@ use web_time::Instant;
 
 use crate::incoming_stream::ClientMessage;
 use crate::message::Codec;
-use crate::peer_selection::{GlobalStats, PeerMetrics, PeerSelectionConfig, PeerSelector, RequestPhase, RequestTracker};
+use crate::peer_selection::{GlobalStats, PeerDetail, PeerMetrics, PeerSelectionConfig, PeerSelector, RequestPhase, RequestTracker};
 use crate::proto::message::mod_Message::{BlockPresenceType, Wantlist as ProtoWantlist};
 use crate::proto::message::Message;
 use crate::utils::{box_future, convert_cid, stream_protocol, BoxFuture};
@@ -557,61 +557,29 @@ where
         self.peers.get(peer_id).map(|state| &state.metrics)
     }
 
-    /// Get all peer rankings sorted by score
-    pub(crate) fn get_peer_rankings(&self) -> Vec<(PeerId, f64)> {
-        let mut rankings: Vec<(PeerId, f64)> = self.peers.iter()
-            .map(|(peer_id, state)| (*peer_id, state.metrics.calculate_score()))
+    /// Get all peer rankings with detailed metrics
+    pub(crate) fn get_peer_rankings(&self) -> Vec<PeerDetail> {
+        let mut details: Vec<PeerDetail> = self.peers.iter()
+            .map(|(peer_id, state)| {
+                let metrics = &state.metrics;
+                PeerDetail {
+                    peer_id: peer_id.to_string(),
+                    score: metrics.calculate_score(),
+                    blocks_received: metrics.blocks_received,
+                    failures: metrics.failures,
+                    success_rate: metrics.success_rate(),
+                    avg_speed: metrics.avg_speed(),
+                    avg_rtt_ms: metrics.avg_rtt_ms,
+                }
+            })
             .collect();
-        rankings.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        rankings
+        details.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        details
     }
 
     /// Get global stats
     pub(crate) fn get_global_stats(&self) -> &GlobalStats {
         &self.global_stats
-    }
-
-    /// Print stats report
-    pub(crate) fn print_stats_report(&self) {
-        let stats = &self.global_stats;
-        let total_requests = stats.successful_requests + stats.failed_requests;
-        let success_rate = if total_requests > 0 {
-            (stats.successful_requests as f64 / total_requests as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        tracing::info!(
-            "Beetswap Stats: top_n={}, enabled={}, randomness={}, requests={}, success={}, failed={}, rate={:.2}%, received={:.2} MB",
-            self.peer_selection_config.top_n,
-            self.peer_selection_config.enabled,
-            self.peer_selection_config.enable_randomness,
-            total_requests,
-            stats.successful_requests,
-            stats.failed_requests,
-            success_rate,
-            stats.total_bytes_received as f64 / (1024.0 * 1024.0)
-        );
-
-        let rankings = self.get_peer_rankings();
-        if !rankings.is_empty() {
-            tracing::info!("Top {} peers:", rankings.len().min(10));
-            for (i, (peer_id, score)) in rankings.iter().take(10).enumerate() {
-                if let Some(metrics) = self.get_peer_metrics(peer_id) {
-                    tracing::info!(
-                        "  #{:<2} {} | score: {:.2} | success: {} | fail: {} | rate: {:.1}% | speed: {:.2} MB/s | rtt: {:.0}ms",
-                        i + 1,
-                        peer_id,
-                        score,
-                        metrics.blocks_received,
-                        metrics.failures,
-                        metrics.success_rate() * 100.0,
-                        metrics.avg_speed() / (1024.0 * 1024.0),
-                        metrics.avg_rtt_ms
-                    );
-                }
-            }
-        }
     }
 
     /// Handle request timeout or failure

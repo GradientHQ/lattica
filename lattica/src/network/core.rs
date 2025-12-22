@@ -44,8 +44,7 @@ pub enum Command{
     StopProviding(RecordKey, oneshot::Sender<Result<()>>),
     ConfigureBitswapPeerSelection(beetswap::PeerSelectionConfig, oneshot::Sender<Result<()>>),
     GetBitswapGlobalStats(oneshot::Sender<Result<beetswap::GlobalStats>>),
-    GetBitswapPeerRankings(oneshot::Sender<Result<Vec<(PeerId, f64)>>>),
-    PrintBitswapStats,
+    GetBitswapPeerRankings(oneshot::Sender<Result<Vec<beetswap::PeerDetail>>>),
 }
 
 #[derive(Clone)]
@@ -909,16 +908,11 @@ impl Lattica {
         rx.await?
     }
 
-    /// Get Bitswap peer rankings
-    pub async fn get_bitswap_peer_rankings(&self) -> Result<Vec<(PeerId, f64)>> {
+    /// Get Bitswap peer rankings with detailed metrics
+    pub async fn get_bitswap_peer_rankings(&self) -> Result<Vec<beetswap::PeerDetail>> {
         let (tx, rx) = oneshot::channel();
         self.cmd.try_send(Command::GetBitswapPeerRankings(tx))?;
         rx.await?
-    }
-
-    /// Print Bitswap stats report
-    pub fn print_bitswap_stats(&self) {
-        self.cmd.try_send(Command::PrintBitswapStats).ok();
     }
 }
 
@@ -1211,9 +1205,6 @@ async fn swarm_poll(
                 Command::GetBitswapPeerRankings(tx) => {
                     let rankings = swarm.behaviour().get_bitswap_peer_rankings();
                     let _ = tx.send(Ok(rankings));
-                }
-                Command::PrintBitswapStats => {
-                    swarm.behaviour().print_bitswap_stats();
                 }
             }
         }

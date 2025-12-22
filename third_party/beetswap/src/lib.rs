@@ -44,7 +44,7 @@ use crate::server::{ServerBehaviour, ServerConnectionHandler};
 
 pub use crate::builder::BehaviourBuilder;
 pub use crate::client::QueryId;
-pub use crate::peer_selection::{GlobalStats, PeerMetrics, PeerSelectionConfig};
+pub use crate::peer_selection::{GlobalStats, PeerDetail, PeerMetrics, PeerSelectionConfig};
 
 /// [`NetworkBehaviour`] for Bitswap protocol.
 #[derive(Debug)]
@@ -167,19 +167,14 @@ where
         self.client.get_peer_metrics(peer_id)
     }
 
-    /// Get score rankings for all peers
-    pub fn get_peer_rankings(&self) -> Vec<(PeerId, f64)> {
+    /// Get peer rankings with detailed metrics
+    pub fn get_peer_rankings(&self) -> Vec<PeerDetail> {
         self.client.get_peer_rankings()
     }
 
     /// Get global transfer statistics
     pub fn get_global_stats(&self) -> &GlobalStats {
         self.client.get_global_stats()
-    }
-
-    /// Print statistics report
-    pub fn print_stats_report(&self) {
-        self.client.print_stats_report();
     }
 }
 

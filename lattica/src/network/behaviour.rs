@@ -289,15 +289,8 @@ impl LatticaBehaviour{
         self.bitswap.as_ref().map(|b| b.get_global_stats().clone())
     }
 
-    /// Get Bitswap peer rankings
-    pub fn get_bitswap_peer_rankings(&self) -> Vec<(PeerId, f64)> {
+    /// Get Bitswap peer rankings with detailed metrics
+    pub fn get_bitswap_peer_rankings(&self) -> Vec<beetswap::PeerDetail> {
         self.bitswap.as_ref().map(|b| b.get_peer_rankings()).unwrap_or_default()
-    }
-
-    /// Print Bitswap stats report
-    pub fn print_bitswap_stats(&self) {
-        if let Some(bitswap) = self.bitswap.as_ref() {
-            bitswap.print_stats_report();
-        }
     }
 }

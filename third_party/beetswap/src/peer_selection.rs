@@ -136,6 +136,18 @@ impl PeerMetrics {
     }
 }
 
+/// Detailed peer information for external reporting
+#[derive(Debug, Clone)]
+pub struct PeerDetail {
+    pub peer_id: String,
+    pub score: f64,
+    pub blocks_received: u64,
+    pub failures: u64,
+    pub success_rate: f64,
+    pub avg_speed: f64,
+    pub avg_rtt_ms: f64,
+}
+
 /// Peer selection configuration
 #[derive(Debug, Clone)]
 pub struct PeerSelectionConfig {
