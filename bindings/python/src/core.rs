@@ -593,7 +593,7 @@ impl LatticaSDK {
     }
 
     /// Get Bitswap peer rankings with detailed metrics
-    fn get_bitswap_peer_rankings_detailed(&self, py: Python) -> PyResult<PyObject> {
+    fn get_bitswap_peer_rankings(&self, py: Python) -> PyResult<PyObject> {
         py.allow_threads(|| {
             self.runtime.block_on(async move {
                 let details = self.lattica.get_bitswap_peer_rankings().await

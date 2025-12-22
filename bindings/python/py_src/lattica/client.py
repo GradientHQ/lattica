@@ -298,7 +298,7 @@ class Lattica:
             - avg_rtt_ms: Average RTT in milliseconds
         """
         try:
-            return self._lattica_instance.get_bitswap_peer_rankings_detailed()
+            return self._lattica_instance.get_bitswap_peer_rankings()
         except Exception as e:
             raise RuntimeError(f"Failed to get bitswap peer rankings: {e}")
 
