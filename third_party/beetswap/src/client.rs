@@ -79,11 +79,11 @@ where
     next_query_id: u64,
     send_full_timer: Delay,
     new_blocks: Vec<(CidGeneric<S>, Vec<u8>)>,
-    /// 节点选择配置
+    /// Peer selection config
     peer_selection_config: PeerSelectionConfig,
-    /// 请求跟踪表
+    /// Request trackers
     request_trackers: FnvHashMap<CidGeneric<S>, RequestTracker<S>>,
-    /// 全局统计
+    /// Global stats
     global_stats: GlobalStats,
 }
 
@@ -104,7 +104,7 @@ struct PeerState<const S: usize> {
     sending_state: SendingState,
     wantlist: WantlistState<S>,
     send_full: bool,
-    /// 节点性能指标
+    /// Peer performance metrics
     metrics: PeerMetrics,
 }
 
@@ -306,13 +306,9 @@ where
         for (cid, block) in msg.blocks {
             let block_size = block.len();
             
-            tracing::info!("收到数据块: CID={}, size={}, wantlist包含={}", cid, block_size, self.wantlist.cids.contains(&cid));
-            
-            // ===== 检查是否是重复数据（同一 CID 从多个节点返回）=====
             let is_first_response = self.wantlist.cids.contains(&cid);
             
-            // ===== 始终更新节点统计（每个节点的性能都要记录）=====
-            // 尝试从 tracker 获取精确时间
+            // Get timing info from tracker
             let (elapsed_ms, tracker_info) = if let Some(tracker) = self.request_trackers.get(&cid) {
                 let elapsed = tracker.start_time.elapsed();
                 let phase = match tracker.request_phase {
@@ -321,29 +317,19 @@ where
                 };
                 (elapsed.as_millis() as u64, format!("tracked({})", phase))
             } else {
-                // 没有 tracker - 可能是重复响应
-                if !is_first_response {
-                    tracing::debug!("⚠ CID {} 的重复响应，跳过统计", cid);
-                } else {
-                    tracing::warn!("⚠ CID {} 没有 tracker，无法记录精确时间", cid);
-                }
                 (0, "no_tracker".to_string())
             };
 
-            // 记录节点成功（每个返回数据的节点都记录）
+            // Record peer metrics
             peer_state.metrics.record_success(block_size, elapsed_ms);
 
-            // ===== 只有第一次收到数据时才更新全局统计 =====
+            // Update global stats only for first response
             if is_first_response {
-                // 移除 tracker（避免重复计算）
                 self.request_trackers.remove(&cid);
-                
-                // 更新全局统计
                 self.global_stats.successful_requests += 1;
                 self.global_stats.total_bytes_received += block_size as u64;
             }
 
-            // 计算速度并记录日志
             let speed_mbps = if elapsed_ms > 0 {
                 (block_size as f64 / elapsed_ms as f64) * 1000.0 / (1024.0 * 1024.0)
             } else {
@@ -351,8 +337,8 @@ where
             };
 
             tracing::info!(
-                "{} 接收 CID {} 从节点 {} | {:.2} MB | {} ms | {:.2} MB/s | 评分: {:.2} | {}",
-                if is_first_response { "✓" } else { "⟳" },  // ⟳ 表示重复响应
+                "{} CID {} from {} | {:.2} MB | {} ms | {:.2} MB/s | score: {:.2} | {}",
+                if is_first_response { "recv" } else { "dup" },
                 cid,
                 peer,
                 block_size as f64 / (1024.0 * 1024.0),
@@ -362,10 +348,8 @@ where
                 tracker_info
             );
             
-            // 检查 wantlist 并处理查询响应
             if !self.wantlist.remove(&cid) {
                 debug_assert!(!self.cid_to_queries.contains_key(&cid));
-                tracing::debug!("收到重复的数据块，已更新节点统计但跳过查询响应");
                 continue;
             }
 
@@ -401,26 +385,17 @@ where
         let mut handler_updated = false;
         let mut peers_without_connection = SmallVec::<[PeerId; 8]>::new();
 
-        // ===== 新增：智能节点选择逻辑 =====
-        // 第一步：识别哪些 CID 已经收到 Have 响应，准备进入 WantBlock 阶段
-        // 同时统计已经发送 WantBlock 的节点数量，避免重复发送
+        // Smart peer selection: identify candidates and count already-sent WantBlock requests
         let mut cid_to_candidates: FnvHashMap<CidGeneric<S>, Vec<PeerId>> = FnvHashMap::default();
         let mut cid_already_sent_count: FnvHashMap<CidGeneric<S>, usize> = FnvHashMap::default();
         
         for cid in &self.wantlist.cids {
-            // 统计已经发送 WantBlock 的节点数量
-            let already_sent: usize = self
-                .peers
-                .iter()
+            let already_sent: usize = self.peers.iter()
                 .filter(|(_, state)| state.wantlist.has_sent_want_block(cid))
                 .count();
-            
             cid_already_sent_count.insert(*cid, already_sent);
             
-            // 只收集还没发送 WantBlock 的候选节点（GotHave 状态）
-            let candidates: Vec<PeerId> = self
-                .peers
-                .iter()
+            let candidates: Vec<PeerId> = self.peers.iter()
                 .filter(|(_, state)| state.wantlist.has_received_have(cid))
                 .map(|(peer_id, _)| *peer_id)
                 .collect();
@@ -430,24 +405,18 @@ where
             }
         }
 
-        // 第二步：为每个需要 WantBlock 的 CID 选择最优节点
+        // Select optimal peers for each CID
         let mut selected_peers_for_cid: FnvHashMap<CidGeneric<S>, Vec<PeerId>> = FnvHashMap::default();
         
         for (cid, candidate_peers) in &cid_to_candidates {
-            // 检查是否已经发送了足够数量的 WantBlock 请求
             let already_sent = *cid_already_sent_count.get(cid).unwrap_or(&0);
             let top_n = self.peer_selection_config.top_n;
             
             if already_sent >= top_n {
-                // 已经发送了足够的 WantBlock 请求，不需要再选择新节点
-                debug!(
-                    "CID {} - 已发送 {} 个 WantBlock 请求，达到 top_n={} 上限，跳过选择",
-                    cid, already_sent, top_n
-                );
+                debug!("CID {} - already sent {} WantBlock, skipping (top_n={})", cid, already_sent, top_n);
                 continue;
             }
             
-            // 还需要选择的节点数量
             let need_to_select = top_n - already_sent;
             
             let candidates_with_metrics: FnvHashMap<PeerId, &PeerMetrics> = candidate_peers
@@ -461,29 +430,16 @@ where
                 continue;
             }
 
-            // 使用智能选择器选择节点（限制选择数量）
             let mut temp_config = self.peer_selection_config.clone();
             temp_config.top_n = need_to_select;
-            let selected = PeerSelector::select_top_peers(
-                &candidates_with_metrics,
-                &temp_config,
-            );
+            let selected = PeerSelector::select_top_peers(&candidates_with_metrics, &temp_config);
 
             debug!(
-                "CID {} - 已发送: {}, 候选节点: {}, 新选中: {} 个 (top_n={})",
-                cid,
-                already_sent,
-                candidates_with_metrics.len(),
-                selected.len(),
-                top_n
+                "CID {} - sent: {}, candidates: {}, selected: {} (top_n={})",
+                cid, already_sent, candidates_with_metrics.len(), selected.len(), top_n
             );
 
-            // 调试：打印节点排名
-            if tracing::enabled!(tracing::Level::DEBUG) && candidates_with_metrics.len() > 1 {
-                PeerSelector::print_peer_rankings(&candidates_with_metrics);
-            }
-
-            // 记录请求跟踪信息
+            // Update request tracker
             let tracker = self.request_trackers.entry(*cid).or_insert_with(|| {
                 RequestTracker {
                     cid: *cid,
@@ -494,7 +450,6 @@ where
                 }
             });
             
-            // 更新 tracker 状态为 Fetching 阶段
             if tracker.want_block_sent_time.is_none() {
                 tracker.want_block_sent_time = Some(Instant::now());
             }
@@ -507,7 +462,7 @@ where
             selected_peers_for_cid.insert(*cid, selected);
         }
 
-        // 第三步：为每个节点生成 wantlist
+        // Generate wantlist for each peer
         for (peer, state) in self.peers.iter_mut() {
             // Clear out bad connections
             match state.sending_state {
@@ -545,7 +500,7 @@ where
                 continue;
             };
 
-            // 确定该节点是否应该接收 WantBlock 请求
+            // Determine which CIDs this peer should receive WantBlock for
             let should_send_want_blocks: FnvHashSet<CidGeneric<S>> = selected_peers_for_cid
                 .iter()
                 .filter(|(_, selected_peers)| selected_peers.contains(peer))
@@ -583,46 +538,40 @@ where
         handler_updated
     }
 
-    /// 设置节点选择配置
+    /// Set peer selection config
     pub(crate) fn set_peer_selection_config(&mut self, config: PeerSelectionConfig) {
-        self.peer_selection_config = config.clone();
         tracing::info!(
-            "节点选择配置已更新: top_n={}, enabled={}, min_peers={}, randomness={}",
-            config.top_n,
-            config.enabled,
-            config.min_peers,
-            config.enable_randomness
+            "Peer selection config updated: top_n={}, enabled={}, min_peers={}, randomness={}",
+            config.top_n, config.enabled, config.min_peers, config.enable_randomness
         );
+        self.peer_selection_config = config;
     }
 
-    /// 获取节点选择配置
+    /// Get peer selection config
     pub(crate) fn get_peer_selection_config(&self) -> &PeerSelectionConfig {
         &self.peer_selection_config
     }
 
-    /// 获取节点指标
+    /// Get peer metrics
     pub(crate) fn get_peer_metrics(&self, peer_id: &PeerId) -> Option<&PeerMetrics> {
         self.peers.get(peer_id).map(|state| &state.metrics)
     }
 
-    /// 获取所有节点的评分排名
+    /// Get all peer rankings sorted by score
     pub(crate) fn get_peer_rankings(&self) -> Vec<(PeerId, f64)> {
-        let mut rankings: Vec<(PeerId, f64)> = self
-            .peers
-            .iter()
+        let mut rankings: Vec<(PeerId, f64)> = self.peers.iter()
             .map(|(peer_id, state)| (*peer_id, state.metrics.calculate_score()))
             .collect();
-
         rankings.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         rankings
     }
 
-    /// 获取全局统计
+    /// Get global stats
     pub(crate) fn get_global_stats(&self) -> &GlobalStats {
         &self.global_stats
     }
 
-    /// 打印统计报告
+    /// Print stats report
     pub(crate) fn print_stats_report(&self) {
         let stats = &self.global_stats;
         let total_requests = stats.successful_requests + stats.failed_requests;
@@ -633,14 +582,7 @@ where
         };
 
         tracing::info!(
-            "\n╔════════════════════════════════════════════════════════╗\n\
-             ║     Beetswap 智能节点选择统计报告                      ║\n\
-             ╠════════════════════════════════════════════════════════╣\n\
-             ║ 配置: Top {} 节点, 启用: {}, 随机性: {}           ║\n\
-             ║ 总请求: {}, 成功: {}, 失败: {}                   ║\n\
-             ║ 成功率: {:.2}%                                        ║\n\
-             ║ 总接收数据: {:.2} MB                                 ║\n\
-             ╚════════════════════════════════════════════════════════╝",
+            "Beetswap Stats: top_n={}, enabled={}, randomness={}, requests={}, success={}, failed={}, rate={:.2}%, received={:.2} MB",
             self.peer_selection_config.top_n,
             self.peer_selection_config.enabled,
             self.peer_selection_config.enable_randomness,
@@ -653,11 +595,11 @@ where
 
         let rankings = self.get_peer_rankings();
         if !rankings.is_empty() {
-            tracing::info!("\n前 {} 名节点排名:", rankings.len().min(10));
+            tracing::info!("Top {} peers:", rankings.len().min(10));
             for (i, (peer_id, score)) in rankings.iter().take(10).enumerate() {
                 if let Some(metrics) = self.get_peer_metrics(peer_id) {
                     tracing::info!(
-                        "  #{:<2} 节点: {} | 评分: {:.2} | 成功: {} | 失败: {} | 成功率: {:.1}% | 速度: {:.2} MB/s | RTT: {:.0}ms",
+                        "  #{:<2} {} | score: {:.2} | success: {} | fail: {} | rate: {:.1}% | speed: {:.2} MB/s | rtt: {:.0}ms",
                         i + 1,
                         peer_id,
                         score,
@@ -672,7 +614,8 @@ where
         }
     }
 
-    /// 处理请求超时或失败
+    /// Handle request timeout or failure
+    #[allow(dead_code)]
     pub(crate) fn handle_request_failure(&mut self, cid: &CidGeneric<S>, peer: Option<PeerId>) {
         if let Some(tracker) = self.request_trackers.remove(cid) {
             self.global_stats.failed_requests += 1;
@@ -680,16 +623,9 @@ where
             if let Some(peer_id) = peer {
                 if let Some(peer_state) = self.peers.get_mut(&peer_id) {
                     peer_state.metrics.record_failure();
-
-                    tracing::warn!(
-                        "✗ CID {} 从节点 {} 失败 | 新评分: {:.2}",
-                        cid,
-                        peer_id,
-                        peer_state.metrics.calculate_score()
-                    );
+                    tracing::warn!("CID {} from {} failed | new score: {:.2}", cid, peer_id, peer_state.metrics.calculate_score());
                 }
             } else {
-                // 不知道是哪个节点失败，给所有发送过的节点记录失败
                 for peer_id in &tracker.peers_sent {
                     if let Some(peer_state) = self.peers.get_mut(peer_id) {
                         peer_state.metrics.record_failure();
@@ -699,22 +635,19 @@ where
         }
     }
 
-    /// 定期清理过期的请求跟踪
+    /// Cleanup stale request trackers
+    #[allow(dead_code)]
     pub(crate) fn cleanup_stale_trackers(&mut self) {
         let now = Instant::now();
-        let mut stale_cids = Vec::new();
-
-        for (cid, tracker) in &self.request_trackers {
-            let age = now.duration_since(tracker.start_time).as_secs();
-            if age > 60 {
-                stale_cids.push(*cid);
-            }
-        }
+        let stale_cids: Vec<_> = self.request_trackers.iter()
+            .filter(|(_, tracker)| now.duration_since(tracker.start_time).as_secs() > 60)
+            .map(|(cid, _)| *cid)
+            .collect();
 
         for cid in stale_cids {
             self.request_trackers.remove(&cid);
             self.global_stats.failed_requests += 1;
-            tracing::warn!("清理过期请求: CID {}, 超时", cid);
+            tracing::warn!("Stale request cleanup: CID {} timed out", cid);
         }
     }
 
@@ -753,12 +686,12 @@ where
                         self.wantlist.insert(cid);
                         self.cid_to_queries.entry(cid).or_default().push(query_id);
                         
-                        // ===== 立即创建 RequestTracker 以记录精确的请求时间 =====
+                        // Create RequestTracker to record precise timing
                         self.request_trackers.entry(cid).or_insert_with(|| {
                             RequestTracker {
                                 cid,
                                 start_time: Instant::now(),
-                                want_block_sent_time: None,  // 稍后在发送 WantBlock 时更新
+                                want_block_sent_time: None,
                                 peers_sent: FnvHashSet::default(),
                                 request_phase: RequestPhase::Probing,
                             }

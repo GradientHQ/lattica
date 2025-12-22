@@ -4,26 +4,26 @@ use libp2p_identity::PeerId;
 use rand::seq::SliceRandom;
 use std::cmp::Ordering;
 
-/// 节点性能统计指标
+/// Peer performance metrics
 #[derive(Debug, Clone)]
 pub struct PeerMetrics {
-    /// 成功接收的块数
+    /// Number of blocks received
     pub blocks_received: u64,
-    /// 失败次数
+    /// Number of failures
     pub failures: u64,
-    /// 总接收字节数
+    /// Total bytes received
     pub total_bytes: u64,
-    /// 总传输时间（毫秒）
+    /// Total transfer time (ms)
     pub total_time_ms: u64,
-    /// 最近 N 次传输速度记录（字节/秒）
+    /// Recent transfer speeds (bytes/sec)
     pub recent_speeds: std::collections::VecDeque<f64>,
-    /// 最近更新时间
+    /// Last update time
     pub last_updated: web_time::Instant,
-    /// 平均往返时间（RTT，毫秒）
+    /// Average RTT (ms)
     pub avg_rtt_ms: f64,
-    /// 连续成功次数
+    /// Consecutive successes
     pub consecutive_successes: u32,
-    /// 连续失败次数
+    /// Consecutive failures
     pub consecutive_failures: u32,
 }
 
@@ -44,16 +44,16 @@ impl Default for PeerMetrics {
 }
 
 impl PeerMetrics {
-    /// 计算成功率 (0.0 - 1.0)
+    /// Calculate success rate (0.0 - 1.0)
     pub fn success_rate(&self) -> f64 {
         let total = self.blocks_received + self.failures;
         if total == 0 {
-            return 0.5; // 新节点给予中等评分
+            return 0.5; // New peer gets neutral score
         }
         self.blocks_received as f64 / total as f64
     }
 
-    /// 计算平均传输速度（字节/秒）
+    /// Calculate average speed (bytes/sec)
     pub fn avg_speed(&self) -> f64 {
         if self.recent_speeds.is_empty() {
             return 0.0;
@@ -61,55 +61,48 @@ impl PeerMetrics {
         self.recent_speeds.iter().sum::<f64>() / self.recent_speeds.len() as f64
     }
 
-    /// 计算综合评分（0.0 - 100.0）
+    /// Calculate composite score (0.0 - 100.0)
     pub fn calculate_score(&self) -> f64 {
-        // 权重配置
-        const SPEED_WEIGHT: f64 = 0.4;        // 速度权重 40%
-        const SUCCESS_RATE_WEIGHT: f64 = 0.3; // 成功率权重 30%
-        const RTT_WEIGHT: f64 = 0.2;          // RTT权重 20%
-        const STABILITY_WEIGHT: f64 = 0.1;    // 稳定性权重 10%
+        const SPEED_WEIGHT: f64 = 0.4;
+        const SUCCESS_RATE_WEIGHT: f64 = 0.3;
+        const RTT_WEIGHT: f64 = 0.2;
+        const STABILITY_WEIGHT: f64 = 0.1;
 
-        // 1. 速度评分 (归一化到 0-100)
-        let speed = self.avg_speed();
-        let speed_mb_s = speed / (1024.0 * 1024.0);
+        // Speed score (normalized to 0-100)
+        let speed_mb_s = self.avg_speed() / (1024.0 * 1024.0);
         let speed_score = (speed_mb_s.min(100.0) / 100.0) * 100.0;
 
-        // 2. 成功率评分 (0-100)
+        // Success rate score (0-100)
         let success_score = self.success_rate() * 100.0;
 
-        // 3. RTT评分 (越低越好，归一化到 0-100)
+        // RTT score (lower is better, normalized to 0-100)
         let rtt_score = if self.avg_rtt_ms > 0.0 {
             ((1000.0 - self.avg_rtt_ms.min(1000.0)) / 1000.0) * 100.0
         } else {
-            50.0 // 未知RTT给予中等评分
+            50.0
         };
 
-        // 4. 稳定性评分（基于连续成功次数）
+        // Stability score (based on consecutive successes)
         let stability_score = if self.consecutive_failures > 3 {
-            0.0 // 连续失败过多，评分为0
+            0.0
         } else {
             (self.consecutive_successes.min(10) as f64 / 10.0) * 100.0
         };
 
-        // 5. 时间衰减因子（长时间未使用的节点降低评分）
+        // Time decay factor
         let elapsed = self.last_updated.elapsed().as_secs();
-        let decay_factor = if elapsed > 300 {
-            0.8 // 超过5分钟未使用，评分衰减
-        } else {
-            1.0
-        };
+        let decay_factor = if elapsed > 300 { 0.8 } else { 1.0 };
 
-        // 综合评分
         let score = (speed_score * SPEED_WEIGHT
             + success_score * SUCCESS_RATE_WEIGHT
             + rtt_score * RTT_WEIGHT
             + stability_score * STABILITY_WEIGHT)
             * decay_factor;
 
-        score.max(0.0).min(100.0)
+        score.clamp(0.0, 100.0)
     }
 
-    /// 记录成功传输
+    /// Record successful transfer
     pub fn record_success(&mut self, bytes: usize, duration_ms: u64) {
         self.blocks_received += 1;
         self.total_bytes += bytes as u64;
@@ -118,7 +111,6 @@ impl PeerMetrics {
         self.consecutive_failures = 0;
         self.last_updated = web_time::Instant::now();
 
-        // 计算本次速度
         if duration_ms > 0 {
             let speed = (bytes as f64 / duration_ms as f64) * 1000.0;
             if self.recent_speeds.len() >= 10 {
@@ -127,7 +119,7 @@ impl PeerMetrics {
             self.recent_speeds.push_back(speed);
         }
 
-        // 更新平均 RTT（使用指数移动平均）
+        // Update average RTT using exponential moving average
         if self.avg_rtt_ms == 0.0 {
             self.avg_rtt_ms = duration_ms as f64;
         } else {
@@ -135,7 +127,7 @@ impl PeerMetrics {
         }
     }
 
-    /// 记录失败
+    /// Record failure
     pub fn record_failure(&mut self) {
         self.failures += 1;
         self.consecutive_failures += 1;
@@ -144,16 +136,16 @@ impl PeerMetrics {
     }
 }
 
-/// 节点选择配置
+/// Peer selection configuration
 #[derive(Debug, Clone)]
 pub struct PeerSelectionConfig {
-    /// 选择的最优节点数量
+    /// Number of top peers to select
     pub top_n: usize,
-    /// 是否启用智能选择（false 则使用广播模式）
+    /// Enable smart selection (false = broadcast mode)
     pub enabled: bool,
-    /// 最小节点数量（如果可用节点少于此数，使用所有节点）
+    /// Minimum peers threshold
     pub min_peers: usize,
-    /// 是否启用随机性（从 top_n * 1.5 中随机选择 top_n 个）
+    /// Enable randomness in selection
     pub enable_randomness: bool,
 }
 
@@ -168,7 +160,6 @@ impl Default for PeerSelectionConfig {
     }
 }
 
-/// 节点评分项（用于排序）
 #[derive(Debug, Clone)]
 struct ScoredPeer {
     peer_id: PeerId,
@@ -195,21 +186,19 @@ impl Ord for ScoredPeer {
     }
 }
 
-/// 节点选择器
+/// Peer selector
 pub struct PeerSelector;
 
 impl PeerSelector {
-    /// 从候选节点中选择最优的 top N 个节点
+    /// Select top N peers from candidates
     pub fn select_top_peers(
         candidates: &FnvHashMap<PeerId, &PeerMetrics>,
         config: &PeerSelectionConfig,
     ) -> Vec<PeerId> {
         if !config.enabled || candidates.len() <= config.min_peers {
-            // 如果未启用智能选择，或节点数太少，返回所有节点
             return candidates.keys().copied().collect();
         }
 
-        // 1. 计算每个节点的评分
         let mut scored_peers: Vec<ScoredPeer> = candidates
             .iter()
             .map(|(peer_id, metrics)| ScoredPeer {
@@ -218,14 +207,11 @@ impl PeerSelector {
             })
             .collect();
 
-        // 2. 按评分排序（降序）
         scored_peers.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
 
-        // 3. 选择 top N
         let selection_count = config.top_n.min(scored_peers.len());
 
         if config.enable_randomness && scored_peers.len() > config.top_n {
-            // 启用随机性：从 top_n * 1.5 个节点中随机选择 top_n 个
             let extended_count = ((config.top_n as f64 * 1.5) as usize).min(scored_peers.len());
             let mut extended_pool: Vec<PeerId> = scored_peers
                 .iter()
@@ -233,13 +219,10 @@ impl PeerSelector {
                 .map(|sp| sp.peer_id)
                 .collect();
 
-            // 使用随机数生成器
             let mut rng = rand::thread_rng();
             extended_pool.shuffle(&mut rng);
-
             extended_pool.into_iter().take(selection_count).collect()
         } else {
-            // 不启用随机性：直接选择 top N
             scored_peers
                 .into_iter()
                 .take(selection_count)
@@ -248,7 +231,8 @@ impl PeerSelector {
         }
     }
 
-    /// 打印节点评分排名（用于调试）
+    /// Print peer rankings for debugging
+    #[allow(dead_code)]
     pub fn print_peer_rankings(candidates: &FnvHashMap<PeerId, &PeerMetrics>) {
         let mut scored_peers: Vec<(PeerId, f64, &PeerMetrics)> = candidates
             .iter()
@@ -257,10 +241,10 @@ impl PeerSelector {
 
         scored_peers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
 
-        tracing::info!("=== 节点评分排名 ===");
+        tracing::debug!("Peer rankings:");
         for (i, (peer_id, score, metrics)) in scored_peers.iter().enumerate() {
-            tracing::info!(
-                "#{} 节点: {} | 评分: {:.2} | 成功率: {:.1}% | 速度: {:.2} MB/s | RTT: {:.0}ms",
+            tracing::debug!(
+                "#{} {} | score: {:.2} | rate: {:.1}% | speed: {:.2} MB/s | rtt: {:.0}ms",
                 i + 1,
                 peer_id,
                 score,
@@ -272,30 +256,30 @@ impl PeerSelector {
     }
 }
 
-/// 请求跟踪信息
+/// Request tracker
 #[derive(Debug)]
 pub struct RequestTracker<const S: usize> {
-    /// 请求的 CID
+    /// Request CID
     pub cid: CidGeneric<S>,
-    /// 请求开始时间
+    /// Request start time
     pub start_time: web_time::Instant,
-    /// WantBlock 发送时间
+    /// WantBlock sent time
     pub want_block_sent_time: Option<web_time::Instant>,
-    /// 已发送 WantBlock 的节点列表
+    /// Peers that received WantBlock
     pub peers_sent: fnv::FnvHashSet<PeerId>,
-    /// 请求类型（探测/获取数据）
+    /// Request phase
     pub request_phase: RequestPhase,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RequestPhase {
-    /// 第一阶段：发送 WantHave 探测
+    /// Phase 1: WantHave probing
     Probing,
-    /// 第二阶段：向选定节点发送 WantBlock
+    /// Phase 2: WantBlock fetching
     Fetching,
 }
 
-/// 全局统计
+/// Global statistics
 #[derive(Debug, Default, Clone)]
 pub struct GlobalStats {
     pub total_requests: u64,

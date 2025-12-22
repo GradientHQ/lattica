@@ -72,14 +72,7 @@ struct PeerWantlist<const S: usize>(FnvHashSet<CidGeneric<S>>);
 
 impl<const S: usize> PeerWantlist<S> {
     /// Updates peers wantlist according to received message. 
-    /// 
-    /// Returns tuple with:
-    /// - CIDs for WantBlock requests (需要发送完整数据)
-    /// - CIDs for WantHave requests (只需发送 BlockPresence)
-    /// - CIDs removed from wantlist
-    /// 
-    /// 重要：只有 WantBlock 类型的请求才会被添加到 wantlist 并触发数据发送。
-    /// WantHave 类型的请求会单独返回，只响应 BlockPresence。
+    /// Returns tuple: (want_blocks, want_haves, removals)
     fn process_wantlist(
         &mut self,
         wantlist: ProtoWantlist,
@@ -92,13 +85,10 @@ impl<const S: usize> PeerWantlist<S> {
                 if e.cancel {
                     continue;
                 }
-                
                 if let Ok(cid) = CidGeneric::try_from(e.block) {
                     if e.wantType == WantType::Block {
-                        tracing::info!("收到 WantBlock 请求: CID={}", cid);
                         want_blocks.push(cid);
                     } else {
-                        tracing::info!("收到 WantHave 请求: CID={}", cid);
                         want_haves.push(cid);
                     }
                 }
@@ -106,21 +96,13 @@ impl<const S: usize> PeerWantlist<S> {
             
             let wanted_cids: FnvHashSet<_> = want_blocks.iter().copied().collect();
             let (additions, removals) = self.wantlist_replace(wanted_cids);
-            
             return (additions, want_haves, removals);
         }
 
-        let (cancels, additions): (Vec<_>, Vec<_>) = wantlist
-            .entries
-            .into_iter()
-            .filter_map(|e| {
-                CidGeneric::<S>::try_from(e.block)
-                    .map(|cid| (e.cancel, cid, e.wantType))
-                    .ok()
-            })
-            .partition(|(cancel, _cid, _want_type)| *cancel);
+        let (cancels, additions): (Vec<_>, Vec<_>) = wantlist.entries.into_iter()
+            .filter_map(|e| CidGeneric::<S>::try_from(e.block).map(|cid| (e.cancel, cid, e.wantType)).ok())
+            .partition(|(cancel, _, _)| *cancel);
 
-        // process cancels first, so that we truncate wantlist correctly
         let mut removed = Vec::with_capacity(cancels.len());
         for (_, cid, _) in cancels {
             if self.0.remove(&cid) {
@@ -133,8 +115,6 @@ impl<const S: usize> PeerWantlist<S> {
         
         for (_, cid, want_type) in additions {
             if want_type == WantType::Block {
-                // WantBlock: 添加到 wantlist，发送完整数据
-                tracing::info!("收到 WantBlock 请求(增量): CID={}", cid);
                 if self.0.len() >= MAX_WANTLIST_ENTRIES_PER_PEER {
                     break;
                 }
@@ -142,8 +122,6 @@ impl<const S: usize> PeerWantlist<S> {
                     want_blocks.push(cid)
                 }
             } else {
-                // WantHave: 只响应 BlockPresence
-                tracing::info!("收到 WantHave 请求(增量): CID={}", cid);
                 want_haves.push(cid);
             }
         }
@@ -236,23 +214,17 @@ where
 
         let peer = Arc::new(peer);
         
-        // 处理 WantBlock 请求：发送完整数据
+        // Process WantBlock requests
         for cid in &want_blocks {
-            self.peers_waiting_for_cid
-                .entry(*cid)
-                .or_default()
-                .push(peer.clone());
+            self.peers_waiting_for_cid.entry(*cid).or_default().push(peer.clone());
         }
         if !want_blocks.is_empty() {
             self.schedule_store_get(peer.clone(), want_blocks);
         }
         
-        // 处理 WantHave 请求：只响应 BlockPresence
+        // Process WantHave requests
         for cid in &want_haves {
-            self.peers_wanting_presence
-                .entry(*cid)
-                .or_default()
-                .push(peer.clone());
+            self.peers_wanting_presence.entry(*cid).or_default().push(peer.clone());
         }
         if !want_haves.is_empty() {
             self.schedule_store_check_presence(peer.clone(), want_haves);
@@ -264,17 +236,10 @@ where
     }
 
     pub(crate) fn new_blocks_available(&mut self, blocks: Vec<BlockWithCid<S>>) {
-        // 只有明确收到 WantBlock 请求的节点才会收到这些数据
-        // 不能直接发送给所有收到 WantHave 的节点
         for (cid, data) in blocks {
-            // 检查是否有节点在等待这个 CID (通过 WantBlock 请求)
             if self.peers_waiting_for_cid.contains_key(&cid) {
-                info!("🔹 新数据可用，准备发送: CID={}, Size={:.2}MB", 
-                      cid, data.len() as f64 / (1024.0 * 1024.0));
+                debug!("New block available: CID={}, size={:.2}MB", cid, data.len() as f64 / (1024.0 * 1024.0));
                 self.outgoing_queue.push_back((cid, data));
-            } else {
-                // 没有节点通过 WantBlock 请求这个 CID，不发送
-                debug!("新数据可用但无节点明确请求: CID={}", cid);
             }
         }
     }
@@ -300,15 +265,13 @@ where
 
         while let Some((cid, data)) = self.outgoing_queue.pop_front() {
             let Some(peers_waiting) = self.peers_waiting_for_cid.remove(&cid) else {
-                debug!("⚠️ CID {} 在队列中但没有等待的节点，跳过发送", cid);
                 continue;
             };
 
-            info!("📦 准备发送数据块: CID={}, Size={:.2}MB, 接收节点数: {}", 
+            trace!("Sending block: CID={}, size={:.2}MB, peers={}", 
                   cid, data.len() as f64 / (1024.0 * 1024.0), peers_waiting.len());
 
-            for (idx, peer) in peers_waiting.iter().enumerate() {
-                info!("  └─ 接收节点 #{}: {}", idx + 1, peer);
+            for peer in peers_waiting.iter() {
                 blocks_ready_for_peer
                     .entry(peer.clone())
                     .or_default()
@@ -345,8 +308,7 @@ where
                     debug!("Cid {cid} not in blockstore for {peer}");
                 }
                 Ok(Some(data)) => {
-                    let size_mb = data.len() as f64 / (1024.0 * 1024.0);
-                    info!("🔹 准备发送完整数据块: CID={}, Size={:.2}MB, To={}", cid, size_mb, peer);
+                    trace!("Block ready: CID={}, size={:.2}MB, to={}", cid, data.len() as f64 / (1024.0 * 1024.0), peer);
                     self.outgoing_queue.push_back((cid, data));
                 }
                 Err(e) => {
@@ -361,33 +323,15 @@ where
         
         for result in results {
             let cid = result.cid;
-            match result.data {
-                Ok(None) => {
-                    // CID 不存在，发送 DontHave
-                    info!("📤 发送 DontHave: CID={}, To={}", cid, peer);
-                    presences.push(ProtoBlockPresence {
-                        cid: cid.to_bytes(),
-                        type_pb: BlockPresenceType::DontHave,
-                    });
-                }
-                Ok(Some(_)) => {
-                    // CID 存在，发送 Have
-                    info!("📤 发送 Have: CID={}, To={}", cid, peer);
-                    presences.push(ProtoBlockPresence {
-                        cid: cid.to_bytes(),
-                        type_pb: BlockPresenceType::Have,
-                    });
-                }
-                Err(e) => {
-                    debug!("Fetching {cid} from blockstore failed: {e}, sending DontHave");
-                    presences.push(ProtoBlockPresence {
-                        cid: cid.to_bytes(),
-                        type_pb: BlockPresenceType::DontHave,
-                    });
-                }
-            }
-            
-            // 清理 peers_wanting_presence
+            let presence_type = match result.data {
+                Ok(None) => BlockPresenceType::DontHave,
+                Ok(Some(_)) => BlockPresenceType::Have,
+                Err(_) => BlockPresenceType::DontHave,
+            };
+            presences.push(ProtoBlockPresence {
+                cid: cid.to_bytes(),
+                type_pb: presence_type,
+            });
             self.peers_wanting_presence.remove(&cid);
         }
         
@@ -489,7 +433,6 @@ impl<const S: usize> ServerConnectionHandler<S> {
         ConnectionHandlerEvent<ReadyUpgrade<StreamProtocol>, StreamRequester, ToBehaviourEvent<S>>,
     > {
         loop {
-            // 检查是否有待发送的消息
             let has_messages = self.pending_outgoing_messages.is_some();
             let has_presences = self.pending_outgoing_presences.is_some();
             
