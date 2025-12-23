@@ -165,6 +165,10 @@ where
         });
 
         peer.established_connections.insert(connection_id);
+        
+        // When a new connection is established, retry any DontHave CIDs
+        // as this new peer might have them
+        peer.wantlist.retry_dont_have_cids(&self.wantlist);
 
         ClientConnectionHandler {
             peer_id,
@@ -198,6 +202,8 @@ where
                 if !pending_cids.is_empty() {
                     for remaining_peer_state in self.peers.values_mut() {
                         remaining_peer_state.wantlist.reset_cids(&pending_cids);
+                        // Also retry any DontHave CIDs since peer topology changed
+                        remaining_peer_state.wantlist.retry_dont_have_cids(&self.wantlist);
                         remaining_peer_state.send_full = true;
                     }
                 }

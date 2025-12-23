@@ -108,6 +108,21 @@ impl<const S: usize> WantlistState<S> {
         self.force_update = true;
     }
 
+    /// Reset all GotDontHave CIDs back to SentWantHave to retry
+    /// This is useful when peers change or after some time has passed
+    pub(crate) fn retry_dont_have_cids(&mut self, wantlist: &Wantlist<S>) {
+        let mut updated = false;
+        for (cid, state) in self.req_state.iter_mut() {
+            if matches!(state, WantReqState::GotDontHave) && wantlist.cids.contains(cid) {
+                *state = WantReqState::SentWantHave;
+                updated = true;
+            }
+        }
+        if updated {
+            self.force_update = true;
+        }
+    }
+
     pub(crate) fn generate_proto_full(&mut self, wantlist: &Wantlist<S>) -> ProtoWantlist {
         // Remove canceled requests or received blocks
         self.req_state.retain(|cid, _| wantlist.cids.contains(cid));
