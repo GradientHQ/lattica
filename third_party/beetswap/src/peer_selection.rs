@@ -147,6 +147,12 @@ pub struct PeerSelectionConfig {
     pub min_peers: usize,
     /// Enable randomness in selection
     pub enable_randomness: bool,
+    /// Wait window in milliseconds after first Have response before selecting peers
+    /// This allows more peers to respond with Have, ensuring better selection
+    pub have_wait_window_ms: u64,
+    /// Minimum candidate ratio before starting selection (0.0 - 1.0)
+    /// Selection starts when: candidates >= total_peers * min_candidate_ratio
+    pub min_candidate_ratio: f64,
 }
 
 impl Default for PeerSelectionConfig {
@@ -156,6 +162,8 @@ impl Default for PeerSelectionConfig {
             enabled: true,
             min_peers: 2,
             enable_randomness: true,
+            have_wait_window_ms: 100,  // Wait 100ms for more Have responses
+            min_candidate_ratio: 0.3,   // Or start when 30% of peers responded
         }
     }
 }

@@ -560,12 +560,35 @@ impl LatticaSDK {
     }
 
     /// Configure Bitswap peer selection strategy
-    #[pyo3(signature = (top_n = 3, enabled = true, min_peers = 2, enable_randomness = true))]
-    fn configure_bitswap_peer_selection(&self, top_n: usize, enabled: bool, min_peers: usize, enable_randomness: bool) -> PyResult<()> {
+    /// 
+    /// Args:
+    ///     top_n: Number of top peers to select (default: 3)
+    ///     enabled: Enable smart selection (default: true)
+    ///     min_peers: Minimum peers threshold (default: 2)
+    ///     enable_randomness: Enable randomness in selection (default: true)
+    ///     have_wait_window_ms: Wait window in ms after first Have response (default: 100)
+    ///     min_candidate_ratio: Minimum candidate ratio before selection (default: 0.3)
+    #[pyo3(signature = (top_n = 3, enabled = true, min_peers = 2, enable_randomness = true, have_wait_window_ms = 100, min_candidate_ratio = 0.3))]
+    fn configure_bitswap_peer_selection(
+        &self, 
+        top_n: usize, 
+        enabled: bool, 
+        min_peers: usize, 
+        enable_randomness: bool,
+        have_wait_window_ms: u64,
+        min_candidate_ratio: f64,
+    ) -> PyResult<()> {
         Python::with_gil(|py| {
             py.allow_threads(|| {
                 self.runtime.block_on(async move {
-                    let config = beetswap::PeerSelectionConfig { top_n, enabled, min_peers, enable_randomness };
+                    let config = beetswap::PeerSelectionConfig { 
+                        top_n, 
+                        enabled, 
+                        min_peers, 
+                        enable_randomness,
+                        have_wait_window_ms,
+                        min_candidate_ratio,
+                    };
                     self.lattica.configure_bitswap_peer_selection(config).await
                         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{:?}", e)))
                 })

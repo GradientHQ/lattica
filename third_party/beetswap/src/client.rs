@@ -83,6 +83,8 @@ where
     peer_selection_config: PeerSelectionConfig,
     /// Global stats
     global_stats: GlobalStats,
+    /// Track the first Have response time for each CID (for wait window)
+    cid_first_have_time: FnvHashMap<CidGeneric<S>, Instant>,
 }
 
 #[derive(Debug)]
@@ -158,6 +160,7 @@ where
             new_blocks: Vec::new(),
             peer_selection_config: PeerSelectionConfig::default(),
             global_stats: GlobalStats::default(),
+            cid_first_have_time: FnvHashMap::default(),
         }
     }
 
@@ -276,6 +279,7 @@ where
                     let cid = cid.to_owned();
                     self.cid_to_queries.remove(&cid);
                     self.wantlist.remove(&cid);
+                    self.cid_first_have_time.remove(&cid);
                 }
 
                 break;
@@ -290,10 +294,14 @@ where
 
         let mut new_blocks = Vec::new();
 
-        // Update presence
+        // Update presence and track first Have time for wait window
         for (cid, block_presence) in msg.block_presences {
             match block_presence {
-                BlockPresenceType::Have => peer_state.wantlist.got_have(&cid),
+                BlockPresenceType::Have => {
+                    peer_state.wantlist.got_have(&cid);
+                    // Record first Have time for this CID (for wait window mechanism)
+                    self.cid_first_have_time.entry(cid).or_insert_with(Instant::now);
+                }
                 BlockPresenceType::DontHave => peer_state.wantlist.got_dont_have(&cid),
             }
         }
@@ -339,6 +347,9 @@ where
                 debug_assert!(!self.cid_to_queries.contains_key(&cid));
                 continue;
             }
+
+            // Clean up wait window tracking
+            self.cid_first_have_time.remove(&cid);
 
             peer_state.wantlist.got_block(&cid);
             new_blocks.push((cid, block.clone()));
@@ -392,8 +403,11 @@ where
             }
         }
 
-        // Select optimal peers for each CID
+        // Select optimal peers for each CID (with wait window mechanism)
         let mut selected_peers_for_cid: FnvHashMap<CidGeneric<S>, Vec<PeerId>> = FnvHashMap::default();
+        let total_peers = self.peers.len();
+        let wait_window = Duration::from_millis(self.peer_selection_config.have_wait_window_ms);
+        let min_candidate_ratio = self.peer_selection_config.min_candidate_ratio;
         
         for (cid, candidate_peers) in &cid_to_candidates {
             let already_sent = *cid_already_sent_count.get(cid).unwrap_or(&0);
@@ -401,6 +415,37 @@ where
             
             if already_sent >= top_n {
                 debug!("CID {} - already sent {} WantBlock, skipping (top_n={})", cid, already_sent, top_n);
+                continue;
+            }
+            
+            // Wait window check: ensure we have enough candidates before selecting
+            let should_select = if let Some(first_have_time) = self.cid_first_have_time.get(cid) {
+                let elapsed = first_have_time.elapsed();
+                let min_candidates = ((total_peers as f64) * min_candidate_ratio).ceil() as usize;
+                
+                // Start selection if:
+                // 1. Wait window has elapsed, OR
+                // 2. We have enough candidates (>= min_candidate_ratio), OR
+                // 3. We have enough candidates to fill remaining slots
+                let window_elapsed = elapsed >= wait_window;
+                let enough_candidates = candidate_peers.len() >= min_candidates;
+                let can_fill_slots = candidate_peers.len() >= (top_n - already_sent);
+                
+                if !window_elapsed && !enough_candidates && !can_fill_slots {
+                    debug!(
+                        "CID {} - waiting for more candidates: elapsed={:?}, candidates={}, min={}, window={:?}",
+                        cid, elapsed, candidate_peers.len(), min_candidates, wait_window
+                    );
+                    false
+                } else {
+                    true
+                }
+            } else {
+                // No first Have time recorded yet (shouldn't happen, but be safe)
+                true
+            };
+            
+            if !should_select {
                 continue;
             }
             
@@ -422,8 +467,9 @@ where
             let selected = PeerSelector::select_top_peers(&candidates_with_metrics, &temp_config);
 
             debug!(
-                "CID {} - sent: {}, candidates: {}, selected: {} (top_n={})",
-                cid, already_sent, candidates_with_metrics.len(), selected.len(), top_n
+                "CID {} - sent: {}, candidates: {}, selected: {} (top_n={}, waited: {:?})",
+                cid, already_sent, candidates_with_metrics.len(), selected.len(), top_n,
+                self.cid_first_have_time.get(cid).map(|t| t.elapsed())
             );
 
             selected_peers_for_cid.insert(*cid, selected);

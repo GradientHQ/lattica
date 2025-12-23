@@ -258,7 +258,9 @@ class Lattica:
         top_n: int = 3,
         enabled: bool = True,
         min_peers: int = 2,
-        enable_randomness: bool = True
+        enable_randomness: bool = True,
+        have_wait_window_ms: int = 100,
+        min_candidate_ratio: float = 0.3
     ) -> None:
         """Configure Bitswap peer selection strategy.
         
@@ -267,9 +269,16 @@ class Lattica:
             enabled: Enable smart selection
             min_peers: Minimum peers threshold
             enable_randomness: Enable randomness in selection
+            have_wait_window_ms: Wait window in ms after first Have response before selecting peers.
+                This allows more peers to respond, ensuring better selection. Default: 100ms
+            min_candidate_ratio: Minimum candidate ratio (0.0-1.0) before starting selection.
+                Selection starts when candidates >= total_peers * min_candidate_ratio. Default: 0.3
         """
         try:
-            self._lattica_instance.configure_bitswap_peer_selection(top_n, enabled, min_peers, enable_randomness)
+            self._lattica_instance.configure_bitswap_peer_selection(
+                top_n, enabled, min_peers, enable_randomness, 
+                have_wait_window_ms, min_candidate_ratio
+            )
         except Exception as e:
             raise RuntimeError(f"Failed to configure bitswap peer selection: {e}")
 
