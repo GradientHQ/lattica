@@ -188,7 +188,19 @@ where
                 .remove(&connection_id);
 
             if entry.get().established_connections.is_empty() {
-                entry.remove();
+                let peer_state = entry.remove();
+                
+                let pending_cids: Vec<_> = peer_state.wantlist.pending_cids()
+                    .filter(|cid| self.wantlist.contains(cid))
+                    .copied()
+                    .collect();
+                
+                if !pending_cids.is_empty() {
+                    for remaining_peer_state in self.peers.values_mut() {
+                        remaining_peer_state.wantlist.reset_cids(&pending_cids);
+                        remaining_peer_state.send_full = true;
+                    }
+                }
             }
         }
     }
@@ -337,13 +349,11 @@ where
                     // Allowed to send
                 }
                 SendingState::Requested(instant, connection_id) => {
+                    _ = connection_id;
                     if instant.elapsed() < RECEIVE_REQUEST_TIMEOUT {
                         // Sending in progress
                         continue;
                     }
-                    // Bad connection.
-                    // `ClientConnectionHandler` didn't receive `SendWantlist` request before timeout.
-                    state.established_connections.remove(&connection_id);
                     state.send_full = true;
                     state.sending_state = SendingState::Ready;
                 }
@@ -356,9 +366,7 @@ where
                     continue;
                 }
                 SendingState::Failed(connection_id) => {
-                    // Bad connection.
-                    // `ClientConnectionHandler` failed to send wantlist because of network issues.
-                    state.established_connections.remove(&connection_id);
+                    _ = connection_id;
                     state.send_full = true;
                     state.sending_state = SendingState::Ready;
                 }
