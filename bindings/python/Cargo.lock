@@ -2148,7 +2148,6 @@ name = "lattica-python-core"
 version = "0.0.0"
 dependencies = [
  "async-trait",
- "beetswap",
  "cid",
  "lattica",
  "libp2p",

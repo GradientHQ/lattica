@@ -1,5 +1,4 @@
 use lattica::{network, rpc, common};
-use beetswap;
 use std::sync::{Arc};
 use tokio::sync::{Mutex};
 use pyo3::{prelude::*, types::{PyDict, PyList}, IntoPyObjectExt};
@@ -581,7 +580,7 @@ impl LatticaSDK {
         Python::with_gil(|py| {
             py.allow_threads(|| {
                 self.runtime.block_on(async move {
-                    let config = beetswap::PeerSelectionConfig { 
+                    let config = lattica::PeerSelectionConfig { 
                         top_n, 
                         enabled, 
                         min_peers, 

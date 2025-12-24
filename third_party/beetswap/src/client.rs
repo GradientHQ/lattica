@@ -19,7 +19,7 @@ use libp2p_swarm::{
     ConnectionHandlerEvent, ConnectionId, NotifyHandler, StreamProtocol, SubstreamProtocol, ToSwarm,
 };
 use smallvec::SmallVec;
-use tracing::debug;
+use tracing::{debug, info};
 use web_time::Instant;
 
 use crate::incoming_stream::ClientMessage;
@@ -438,6 +438,7 @@ where
                     );
                     false
                 } else {
+                    info!("CID {} - selecting peers: elapsed={:?}, candidates.len={}, candidates.peers={:?}, min={}, window={:?}", cid, elapsed, candidate_peers.len(), candidate_peers.iter().map(|p| p.to_string()).collect::<Vec<String>>(), min_candidates, wait_window);
                     true
                 }
             } else {
@@ -531,6 +532,18 @@ where
                 state.send_full = false;
             } else if wantlist.entries.is_empty() {
                 continue;
+            }
+
+            // Log WantBlock sending
+            if !should_send_want_blocks.is_empty() {
+                for cid in &should_send_want_blocks {
+                    tracing::info!(
+                        "send WantBlock to {} for CID {} | score: {:.2}",
+                        peer,
+                        cid,
+                        state.metrics.calculate_score()
+                    );
+                }
             }
 
             self.queue.push_back(ToSwarm::NotifyHandler {
