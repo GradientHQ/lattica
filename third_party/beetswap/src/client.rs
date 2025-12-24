@@ -492,10 +492,12 @@ where
                         // Sending in progress
                         continue;
                     }
-                    // Bad connection
+                    // Bad connection - request timeout
                     state.established_connections.remove(&connection_id);
                     state.send_full = true;
                     state.sending_state = SendingState::Ready;
+                    state.metrics.record_failure();
+                    tracing::debug!("Peer {} request timeout, recorded failure", peer);
                 }
                 SendingState::RequestReceived(..) => {
                     // Stream allocation in progress
@@ -506,10 +508,12 @@ where
                     continue;
                 }
                 SendingState::Failed(connection_id) => {
-                    // Bad connection
+                    // Bad connection - sending failed
                     state.established_connections.remove(&connection_id);
                     state.send_full = true;
                     state.sending_state = SendingState::Ready;
+                    state.metrics.record_failure();
+                    tracing::debug!("Peer {} sending failed, recorded failure", peer);
                 }
             };
 
