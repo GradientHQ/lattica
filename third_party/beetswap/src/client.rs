@@ -326,11 +326,7 @@ where
                 self.global_stats.total_bytes_received += block_size as u64;
             }
 
-            let speed_mbps = if elapsed_ms > 0 {
-                (block_size as f64 / elapsed_ms as f64) * 1000.0 / (1024.0 * 1024.0)
-            } else {
-                0.0
-            };
+            let speed_mbps = (block_size as f64 / elapsed_ms as f64) * 1000.0 / (1024.0 * 1024.0);
 
             tracing::info!(
                 "{} CID {} from {} | {:.2} MB | {} ms | {:.2} MB/s | score: {:.2}",
@@ -426,7 +422,7 @@ where
                 // Start selection if:
                 // 1. Wait window has elapsed, OR
                 // 2. We have enough candidates (>= min_candidate_ratio)
-                let window_elapsed = elapsed >= wait_window;
+                let window_elapsed: bool = elapsed >= wait_window;
                 let enough_candidates = candidate_peers.len() >= min_candidates;
                 
                 if window_elapsed || enough_candidates {

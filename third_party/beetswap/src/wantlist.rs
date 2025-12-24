@@ -1,4 +1,5 @@
 use std::collections::hash_map;
+use std::time::Duration;
 
 use cid::CidGeneric;
 use fnv::{FnvHashMap, FnvHashSet};
@@ -6,6 +7,10 @@ use web_time::Instant;
 
 use crate::message::{new_cancel_entry, new_want_block_entry, new_want_have_entry};
 use crate::proto::message::mod_Message::Wantlist as ProtoWantlist;
+
+/// Time threshold for keeping sent_time_cache entries after CID is removed from wantlist.
+/// This allows accurate timing calculation for duplicate blocks that arrive after the first response.
+const SENT_TIME_CACHE_TTL: Duration = Duration::from_secs(600);
 
 #[derive(Debug)]
 pub(crate) struct Wantlist<const S: usize> {
@@ -96,8 +101,7 @@ impl<const S: usize> WantlistState<S> {
                     *state = WantReqState::GotDontHave;
                 }
             });
-        // Clean up sent_time_cache since this CID won't receive a block from this peer
-        self.sent_time_cache.remove(cid);
+        // Don't remove sent_time_cache here - let TTL-based cleanup handle it uniformly
     }
 
     pub(crate) fn got_block(&mut self, cid: &CidGeneric<S>) {
@@ -120,9 +124,9 @@ impl<const S: usize> WantlistState<S> {
     }
 
     /// Get the time when request was initiated for this CID and clear cache entry
-    pub(crate) fn get_request_sent_time(&mut self, cid: &CidGeneric<S>) -> Option<Instant> {
-        // Remove from cache - it's consumed after block is received
-        self.sent_time_cache.remove(cid)
+    pub(crate) fn get_request_sent_time(&self, cid: &CidGeneric<S>) -> Option<Instant> {
+        // Return a copy - cache is cleaned up elsewhere (got_block, got_dont_have, retain)
+        self.sent_time_cache.get(cid).copied()
     }
 
     pub(crate) fn generate_proto_full(&mut self, wantlist: &Wantlist<S>) -> ProtoWantlist {
@@ -136,8 +140,11 @@ impl<const S: usize> WantlistState<S> {
         should_send_want_block: Option<&FnvHashSet<CidGeneric<S>>>,
     ) -> ProtoWantlist {
         self.req_state.retain(|cid, _| wantlist.cids.contains(cid));
-        // Sync sent_time_cache with req_state to prevent memory leaks
-        self.sent_time_cache.retain(|cid, _| wantlist.cids.contains(cid));
+        // Keep sent_time_cache entries that are either in wantlist or recent (for dup block timing)
+        let now = Instant::now();
+        self.sent_time_cache.retain(|cid, sent_time| {
+            wantlist.cids.contains(cid) || now.duration_since(*sent_time) < SENT_TIME_CACHE_TTL
+        });
 
         let now = Instant::now();
         for cid in &wantlist.cids {
@@ -217,9 +224,15 @@ impl<const S: usize> WantlistState<S> {
 
         for cid in removed {
             self.req_state.remove(&cid);
-            // Clean up sent_time_cache when CID is removed (cancel or completed)
-            self.sent_time_cache.remove(&cid);
+            // Don't remove sent_time_cache here - let the TTL-based cleanup handle it
+            // This allows accurate timing for dup blocks that arrive after CID removal
         }
+
+        // TTL-based cleanup for sent_time_cache to prevent memory leaks
+        let now = Instant::now();
+        self.sent_time_cache.retain(|cid, sent_time| {
+            wantlist.cids.contains(cid) || now.duration_since(*sent_time) < SENT_TIME_CACHE_TTL
+        });
 
         let now = Instant::now();
         for cid in &wantlist.cids {
