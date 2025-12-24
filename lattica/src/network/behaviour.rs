@@ -123,7 +123,7 @@ impl LatticaBehaviour{
 
         Self{
             kad,
-            ping: ping::Behaviour::new(ping::Config::new().with_interval(Duration::from_secs(15))),
+            ping: ping::Behaviour::new(ping::Config::new()),
             identify: identify::Behaviour::new(identify::Config::new(
                 proto_version.to_string(),
                 config.keypair.public(),

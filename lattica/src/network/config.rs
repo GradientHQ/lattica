@@ -49,7 +49,7 @@ impl Default for Config {
                 "/ip4/0.0.0.0/tcp/0/ws".parse().unwrap()],
             keypair: key,
             protocol_version: "/lattica/1.0.0".to_string(),
-            idle_timeout: Duration::from_secs(300),
+            idle_timeout: Duration::from_secs(60),
             bootstrap_nodes: vec![],
             external_addrs: vec![],
             with_kad: true,
