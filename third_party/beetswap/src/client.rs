@@ -425,25 +425,23 @@ where
                 
                 // Start selection if:
                 // 1. Wait window has elapsed, OR
-                // 2. We have enough candidates (>= min_candidate_ratio), OR
-                // 3. We have enough candidates to fill remaining slots
+                // 2. We have enough candidates (>= min_candidate_ratio)
                 let window_elapsed = elapsed >= wait_window;
                 let enough_candidates = candidate_peers.len() >= min_candidates;
-                let can_fill_slots = candidate_peers.len() >= (top_n - already_sent);
                 
-                if !window_elapsed && !enough_candidates && !can_fill_slots {
+                if window_elapsed || enough_candidates {
+                    tracing::info!(
+                        "CID {} - start selection: elapsed={:?}, candidates={}, candidate_peers={:?}, min={}, window={:?}",
+                        cid, elapsed, candidate_peers.len(), candidate_peers.iter().map(|p| p.to_string()).collect::<Vec<String>>(), min_candidates, wait_window
+                    );
+                    true
+                } else {
                     // Use trace level to reduce log spam (this is called frequently during polling)
                     tracing::trace!(
                         "CID {} - waiting for more candidates: elapsed={:?}, candidates={}, min={}, window={:?}",
                         cid, elapsed, candidate_peers.len(), min_candidates, wait_window
                     );
                     false
-                } else {
-                    tracing::info!(
-                        "CID {} - start selection: elapsed={:?}, candidates={}, candidate_peers={:?}, min={}, window={:?}",
-                        cid, elapsed, candidate_peers.len(), candidate_peers.iter().map(|p| p.to_string()).collect::<Vec<String>>(), min_candidates, wait_window
-                    );
-                    true
                 }
             } else {
                 // No first Have time recorded yet (shouldn't happen, but be safe)
