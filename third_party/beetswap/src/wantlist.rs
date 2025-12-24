@@ -96,6 +96,8 @@ impl<const S: usize> WantlistState<S> {
                     *state = WantReqState::GotDontHave;
                 }
             });
+        // Clean up sent_time_cache since this CID won't receive a block from this peer
+        self.sent_time_cache.remove(cid);
     }
 
     pub(crate) fn got_block(&mut self, cid: &CidGeneric<S>) {
@@ -134,6 +136,8 @@ impl<const S: usize> WantlistState<S> {
         should_send_want_block: Option<&FnvHashSet<CidGeneric<S>>>,
     ) -> ProtoWantlist {
         self.req_state.retain(|cid, _| wantlist.cids.contains(cid));
+        // Sync sent_time_cache with req_state to prevent memory leaks
+        self.sent_time_cache.retain(|cid, _| wantlist.cids.contains(cid));
 
         let now = Instant::now();
         for cid in &wantlist.cids {
@@ -213,6 +217,8 @@ impl<const S: usize> WantlistState<S> {
 
         for cid in removed {
             self.req_state.remove(&cid);
+            // Clean up sent_time_cache when CID is removed (cancel or completed)
+            self.sent_time_cache.remove(&cid);
         }
 
         let now = Instant::now();
@@ -226,7 +232,13 @@ impl<const S: usize> WantlistState<S> {
         }
 
         self.synced_revision = wantlist.revision;
-        self.force_update = false;
+        
+        // Only clear force_update if there are no pending GotHave states
+        // (i.e., all GotHave CIDs have been processed and sent WantBlock)
+        let has_pending_got_have = self.req_state.values().any(|s| *s == WantReqState::GotHave);
+        if !has_pending_got_have {
+            self.force_update = false;
+        }
 
         ProtoWantlist {
             entries,

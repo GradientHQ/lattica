@@ -432,13 +432,17 @@ where
                 let can_fill_slots = candidate_peers.len() >= (top_n - already_sent);
                 
                 if !window_elapsed && !enough_candidates && !can_fill_slots {
-                    debug!(
+                    // Use trace level to reduce log spam (this is called frequently during polling)
+                    tracing::trace!(
                         "CID {} - waiting for more candidates: elapsed={:?}, candidates={}, min={}, window={:?}",
                         cid, elapsed, candidate_peers.len(), min_candidates, wait_window
                     );
                     false
                 } else {
-                    info!("CID {} - selecting peers: elapsed={:?}, candidates.len={}, candidates.peers={:?}, min={}, window={:?}", cid, elapsed, candidate_peers.len(), candidate_peers.iter().map(|p| p.to_string()).collect::<Vec<String>>(), min_candidates, wait_window);
+                    tracing::info!(
+                        "CID {} - start selection: elapsed={:?}, candidates={}, candidate_peers={:?}, min={}, window={:?}",
+                        cid, elapsed, candidate_peers.len(), candidate_peers.iter().map(|p| p.to_string()).collect::<Vec<String>>(), min_candidates, wait_window
+                    );
                     true
                 }
             } else {
