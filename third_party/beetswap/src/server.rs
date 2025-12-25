@@ -13,7 +13,7 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use libp2p_core::upgrade::ReadyUpgrade;
 use libp2p_identity::PeerId;
 use libp2p_swarm::{
-    ConnectionHandlerEvent, NotifyHandler, StreamProtocol, SubstreamProtocol, ToSwarm,
+    ConnectionHandlerEvent, ConnectionId, NotifyHandler, StreamProtocol, SubstreamProtocol, ToSwarm,
 };
 use smallvec::SmallVec;
 use tracing::{debug, info, trace};
@@ -47,6 +47,8 @@ where
     peers_wantlists: FnvHashMap<PeerId, PeerWantlist<S>>,
     /// list of peers that wait for particular CID (WantBlock requests)
     peers_waiting_for_cid: FnvHashMap<CidGeneric<S>, SmallVec<[Arc<PeerId>; 1]>>,
+    /// tracks established connections for each peer
+    peer_connections: FnvHashMap<PeerId, FnvHashSet<ConnectionId>>,
     /// list of peers that need BlockPresence response for CIDs (WantHave requests)
     peers_wanting_presence: FnvHashMap<CidGeneric<S>, SmallVec<[Arc<PeerId>; 1]>>,
     /// list of blocks received from blockstore or network, that connected peers may be waiting for
@@ -155,6 +157,7 @@ where
             store,
             peers_wantlists: Default::default(),
             peers_waiting_for_cid: Default::default(),
+            peer_connections: Default::default(),
             peers_wanting_presence: Default::default(),
             tasks: Default::default(),
             outgoing_queue: Default::default(),
@@ -216,7 +219,10 @@ where
         
         // Process WantBlock requests
         for cid in &want_blocks {
-            self.peers_waiting_for_cid.entry(*cid).or_default().push(peer.clone());
+            let peers_for_cid = self.peers_waiting_for_cid.entry(*cid).or_default();
+            if !peers_for_cid.iter().any(|p| **p == *peer) {
+                peers_for_cid.push(peer.clone());
+            }
         }
         if !want_blocks.is_empty() {
             self.schedule_store_get(peer.clone(), want_blocks);
@@ -244,14 +250,37 @@ where
         }
     }
 
-    pub(crate) fn new_connection_handler(&mut self, peer: PeerId) -> ServerConnectionHandler<S> {
+    pub(crate) fn new_connection_handler(&mut self, peer: PeerId, connection_id: ConnectionId) -> ServerConnectionHandler<S> {
         self.peers_wantlists.entry(peer).or_default();
+        self.peer_connections.entry(peer).or_default().insert(connection_id);
 
         ServerConnectionHandler {
             protocol: self.protocol.clone(),
             sink: Default::default(),
             pending_outgoing_messages: None,
             pending_outgoing_presences: None,
+        }
+    }
+
+    pub(crate) fn on_connection_closed(&mut self, peer: PeerId, connection_id: ConnectionId) {
+        if let Entry::Occupied(mut entry) = self.peer_connections.entry(peer) {
+            entry.get_mut().remove(&connection_id);
+
+            if entry.get().is_empty() {
+                entry.remove();
+
+                if let Some(wantlist) = self.peers_wantlists.remove(&peer) {
+                    for cid in wantlist.0 {
+                        if let Entry::Occupied(mut cid_entry) = self.peers_waiting_for_cid.entry(cid) {
+                            let peers = cid_entry.get_mut();
+                            peers.retain(|p| **p != peer);
+                            if peers.is_empty() {
+                                cid_entry.remove();
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -271,11 +300,13 @@ where
             trace!("Sending block: CID={}, size={:.2}MB, peers={}", 
                   cid, data.len() as f64 / (1024.0 * 1024.0), peers_waiting.len());
 
-            for peer in peers_waiting.iter() {
-                blocks_ready_for_peer
-                    .entry(peer.clone())
-                    .or_default()
-                    .push((CidPrefix::from_cid(&cid).to_bytes(), data.clone()))
+            for peer in peers_waiting {
+                if self.peer_connections.contains_key(&peer) {
+                    blocks_ready_for_peer
+                        .entry(peer)
+                        .or_default()
+                        .push((CidPrefix::from_cid(&cid).to_bytes(), data.clone()))
+                }
             }
         }
 
@@ -582,9 +613,10 @@ mod tests {
             },
         };
         let peer = PeerId::random();
+        let connection_id = libp2p_swarm::ConnectionId::new_unchecked(0);
 
         let mut server = new_server().await;
-        let _client_connection = server.new_connection_handler(peer);
+        let _client_connection = server.new_connection_handler(peer, connection_id);
         server.process_incoming_message(peer, message);
 
         let ev = poll_fn(|cx| server.poll(cx)).await;
@@ -622,9 +654,10 @@ mod tests {
             },
         };
         let peer = PeerId::random();
+        let connection_id = libp2p_swarm::ConnectionId::new_unchecked(0);
 
         let mut server = new_server().await;
-        let _client_connection = server.new_connection_handler(peer);
+        let _client_connection = server.new_connection_handler(peer, connection_id);
         server.process_incoming_message(peer, message);
 
         // no data yet

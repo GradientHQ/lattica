@@ -196,7 +196,7 @@ where
             peer,
             protocol: self.protocol.clone(),
             client_handler: self.client.new_connection_handler(peer, connection_id),
-            server_handler: self.server.new_connection_handler(peer),
+            server_handler: self.server.new_connection_handler(peer, connection_id),
             incoming_streams: SelectAll::new(),
             multihasher: self.multihasher.clone(),
         })
@@ -214,7 +214,7 @@ where
             peer,
             protocol: self.protocol.clone(),
             client_handler: self.client.new_connection_handler(peer, connection_id),
-            server_handler: self.server.new_connection_handler(peer),
+            server_handler: self.server.new_connection_handler(peer, connection_id),
             incoming_streams: SelectAll::new(),
             multihasher: self.multihasher.clone(),
         })
@@ -229,6 +229,7 @@ where
                 ..
             }) => {
                 self.client.on_connection_closed(peer_id, connection_id);
+                self.server.on_connection_closed(peer_id, connection_id);
             }
             _ => {}
         }

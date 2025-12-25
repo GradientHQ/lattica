@@ -45,6 +45,10 @@ impl<const S: usize> Wantlist<S> {
             false
         }
     }
+
+    pub(crate) fn contains(&self, cid: &CidGeneric<S>) -> bool {
+        self.cids.contains(cid)
+    }
 }
 
 #[derive(Debug)]
@@ -127,6 +131,36 @@ impl<const S: usize> WantlistState<S> {
     pub(crate) fn get_request_sent_time(&self, cid: &CidGeneric<S>) -> Option<Instant> {
         // Return a copy - cache is cleaned up elsewhere (got_block, got_dont_have, retain)
         self.sent_time_cache.get(cid).copied()
+    }
+
+    pub(crate) fn pending_cids(&self) -> impl Iterator<Item = &CidGeneric<S>> {
+        self.req_state.iter()
+            .filter(|(_, state)| !matches!(state, WantReqState::GotBlock))
+            .map(|(cid, _)| cid)
+    }
+
+    pub(crate) fn reset_cids(&mut self, cids: &[CidGeneric<S>]) {
+        for cid in cids {
+            if let Some(state) = self.req_state.get_mut(cid) {
+                *state = WantReqState::SentWantHave;
+            }
+        }
+        self.force_update = true;
+    }
+
+    /// Reset all GotDontHave CIDs back to SentWantHave to retry
+    /// This is useful when peers change or after some time has passed
+    pub(crate) fn retry_dont_have_cids(&mut self, wantlist: &Wantlist<S>) {
+        let mut updated = false;
+        for (cid, state) in self.req_state.iter_mut() {
+            if matches!(state, WantReqState::GotDontHave) && wantlist.cids.contains(cid) {
+                *state = WantReqState::SentWantHave;
+                updated = true;
+            }
+        }
+        if updated {
+            self.force_update = true;
+        }
     }
 
     pub(crate) fn generate_proto_full(&mut self, wantlist: &Wantlist<S>) -> ProtoWantlist {
