@@ -530,7 +530,7 @@ pub(crate) async fn handle_identity_event(
                     address_book.remove_peer(&peer_id);
                     match swarm.disconnect_peer_id(peer_id) {
                         Ok(()) => {
-                            tracing::debug!("protocol version mismatch, disconnect from peer {}", peer_id);
+                            tracing::info!("protocol version mismatch, disconnect from peer {}", peer_id);
                         },
                         Err(()) => {
                         }
