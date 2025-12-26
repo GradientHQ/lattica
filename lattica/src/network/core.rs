@@ -6,20 +6,20 @@ use std::{sync::Arc, error::Error, fs};
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use libp2p::{noise, tcp, yamux, Swarm, SwarmBuilder, identity,swarm::{SwarmEvent},
-            kad::{RecordKey,Mode, PeerRecord, Quorum, Record}, Multiaddr, multiaddr::{Protocol}, PeerId, futures::{future, StreamExt},
+            kad::{RecordKey,Mode, PeerRecord, Quorum, Record}, Multiaddr, multiaddr::{Protocol}, PeerId, futures::{StreamExt},
             request_response::{OutboundRequestId}, Stream};
 use futures::{AsyncReadExt, AsyncWriteExt};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 use bincode::config::standard;
-use futures::future::Either;
 use tokio::task::JoinHandle;
 use fnv::{FnvHashMap};
 use uuid::Uuid;
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use std::time::{Duration, Instant};
+use tokio::time::interval;
 use blockstore::{Blockstore};
 use blockstore::block::Block;
 use crate::common::{compress_data, should_compress, BytesBlock, CompressionAlgorithm, CompressionLevel, QueryId};
@@ -936,19 +936,47 @@ async fn swarm_poll(
     let mut queries = FnvHashMap::<QueryId, QueryChannel>::default();
     let pending_relay_addrs = Arc::new(RwLock::new(Vec::<Multiaddr>::new()));
     let mut cmd_rx = ReceiverStream::new(cmd_rx);
+    
+    // bootstrap and relay monitor
+    let mut reconnect_timer = interval(Duration::from_secs(30));
+    reconnect_timer.tick().await;
 
     loop {
-        match future::select(
-            future::poll_fn(|cx| {
-                swarm.poll_next_unpin(cx)
-            }),
-            cmd_rx.next(),
-        ).await {
-            Either::Left((None, _)) => {
-                tracing::info!("poll_swarm: swarm stream ended, terminating");
-                return;
+        tokio::select! {
+            _ = reconnect_timer.tick() => {
+                for addr in &config.bootstrap_nodes {
+                    if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
+                        if !swarm.is_connected(&peer_id) {
+                            tracing::info!("Bootstrap node {} disconnected, reconnecting...", peer_id);
+                            if let Err(e) = swarm.dial(addr.clone()) {
+                                tracing::warn!("Failed to reconnect to bootstrap {}: {:?}", peer_id, e);
+                            }
+                        }
+                    }
+                }
+
+                if swarm.behaviour().is_relay_enabled() {
+                    for addr in &config.relay_servers {
+                        if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
+                            if !swarm.is_connected(&peer_id) {
+                                tracing::info!("Relay server {} disconnected, reconnecting...", peer_id);
+                                let circuit_addr = addr.clone().with(Protocol::P2pCircuit);
+                                if let Err(e) = swarm.listen_on(circuit_addr) {
+                                    tracing::warn!("Failed to reconnect to relay {}: {:?}", peer_id, e);
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            Either::Left((Some(e), _)) => match e {
+
+            event = swarm.next() => {
+                match event {
+                    None => {
+                        tracing::info!("poll_swarm: swarm stream ended, terminating");
+                        return;
+                    }
+                    Some(e) => match e {
                 SwarmEvent::NewListenAddr { address, .. } => {
                     tracing::info!("Listening on: {}", address.with_p2p(swarm.local_peer_id().clone()).unwrap());
                 }
@@ -1068,13 +1096,19 @@ async fn swarm_poll(
                         _ => {}
                     }
                 }
-                _ => {}
+                    _ => {}
+                    }
+                }
             }
-            Either::Right((None, _)) => {
-                tracing::debug!("poll_swarm: command sender dropped, terminating");
-                return;
-            }
-            Either::Right((Some(cmd), _)) => match cmd {
+            
+            // command handle
+            cmd = cmd_rx.next() => {
+                match cmd {
+                    None => {
+                        tracing::debug!("poll_swarm: command sender dropped, terminating");
+                        return;
+                    }
+                    Some(cmd) => match cmd {
                 Command::GetRecord(key, quorum, tx) => {
                     swarm.behaviour_mut().get_record(key, quorum, tx, &mut queries);
                 }
@@ -1175,6 +1209,8 @@ async fn swarm_poll(
                 }
                 Command::StopProviding(key, tx) => {
                     swarm.behaviour_mut().stop_providing(key, tx);
+                }
+                    }
                 }
             }
         }
