@@ -271,4 +271,26 @@ impl LatticaBehaviour{
             tx.send(Err(anyhow!("Kad is not enabled"))).ok();
         }
     }
+
+    /// Configure Bitswap peer selection strategy
+    pub fn configure_bitswap_peer_selection(&mut self, config: beetswap::PeerSelectionConfig) {
+        if let Some(bitswap) = self.bitswap.as_mut() {
+            bitswap.set_peer_selection_config(config);
+        }
+    }
+
+    /// Get Bitswap peer selection config
+    pub fn get_bitswap_peer_selection_config(&self) -> Option<beetswap::PeerSelectionConfig> {
+        self.bitswap.as_ref().map(|b| b.get_peer_selection_config().clone())
+    }
+
+    /// Get Bitswap global stats
+    pub fn get_bitswap_global_stats(&self) -> Option<beetswap::GlobalStats> {
+        self.bitswap.as_ref().map(|b| b.get_global_stats().clone())
+    }
+
+    /// Get Bitswap peer rankings with detailed metrics
+    pub fn get_bitswap_peer_rankings(&self) -> Vec<beetswap::PeerDetail> {
+        self.bitswap.as_ref().map(|b| b.get_peer_rankings()).unwrap_or_default()
+    }
 }

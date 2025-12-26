@@ -43,6 +43,9 @@ pub enum Command{
     GetProviders(RecordKey, oneshot::Sender<Result<Vec<PeerId>>>),
     StopProviding(RecordKey, oneshot::Sender<Result<()>>),
     CheckConnection(PeerId, oneshot::Sender<bool>),
+    ConfigureBitswapPeerSelection(beetswap::PeerSelectionConfig, oneshot::Sender<Result<()>>),
+    GetBitswapGlobalStats(oneshot::Sender<Result<beetswap::GlobalStats>>),
+    GetBitswapPeerRankings(oneshot::Sender<Result<Vec<beetswap::PeerDetail>>>),
 }
 
 #[derive(Clone)]
@@ -719,16 +722,16 @@ impl Lattica {
             // try reconnect
             tracing::debug!("Peer {} is not connected, attempting to reconnect...", peer_id);
             self.try_reconnect_peer(peer_id, timeout).await?;
-            
+
             // verify status
             let (tx2, rx2) = oneshot::channel();
             self.cmd.try_send(Command::CheckConnection(*peer_id, tx2))?;
             let reconnected = rx2.await.unwrap_or(false);
-            
+
             if !reconnected {
                 return Err(anyhow!("Failed to establish connection to peer {}", peer_id));
             }
-            
+
             tracing::info!("Successfully reconnected to peer {}", peer_id);
         }
 
@@ -737,7 +740,7 @@ impl Lattica {
         if let Some(info) = address_book.info(peer_id) {
             let has_direct = info.addresses().any(|(_, _, _, is_relayed, _)| !is_relayed);
             drop(address_book);
-            
+
             if !has_direct {
                 return Err(anyhow!("Only relayed connection available for peer {}", peer_id));
             }
@@ -974,6 +977,27 @@ impl Lattica {
             .map_err(|_| anyhow!("Failed to read symmetric_nat"))?;
         Ok(*nat)
     }
+
+    /// Configure Bitswap peer selection strategy
+    pub async fn configure_bitswap_peer_selection(&self, config: beetswap::PeerSelectionConfig) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd.try_send(Command::ConfigureBitswapPeerSelection(config, tx))?;
+        rx.await?
+    }
+
+    /// Get Bitswap global stats
+    pub async fn get_bitswap_global_stats(&self) -> Result<beetswap::GlobalStats> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd.try_send(Command::GetBitswapGlobalStats(tx))?;
+        rx.await?
+    }
+
+    /// Get Bitswap peer rankings with detailed metrics
+    pub async fn get_bitswap_peer_rankings(&self) -> Result<Vec<beetswap::PeerDetail>> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd.try_send(Command::GetBitswapPeerRankings(tx))?;
+        rx.await?
+    }
 }
 
 impl Drop for Lattica {
@@ -1020,7 +1044,7 @@ async fn swarm_poll(
     let mut queries = FnvHashMap::<QueryId, QueryChannel>::default();
     let pending_relay_addrs = Arc::new(RwLock::new(Vec::<Multiaddr>::new()));
     let mut cmd_rx = ReceiverStream::new(cmd_rx);
-    
+
     // bootstrap and relay monitor
     let mut reconnect_timer = interval(Duration::from_secs(30));
     reconnect_timer.tick().await;
@@ -1099,7 +1123,7 @@ async fn swarm_poll(
                 SwarmEvent::ConnectionClosed { peer_id,.. } => {
                     tracing::debug!("Connection closed with peer: {}", peer_id);
                     swarm.behaviour_mut().connection_closed(peer_id);
-                    
+
                     // clean stream handle
                     if let Some(removed) = stream_handles.remove(&peer_id) {
                         tracing::debug!("Removed stream handle for disconnected peer: {}", peer_id);
@@ -1190,7 +1214,7 @@ async fn swarm_poll(
                     }
                 }
             }
-            
+
             // command handle
             cmd = cmd_rx.next() => {
                 match cmd {
@@ -1285,7 +1309,7 @@ async fn swarm_poll(
                             bitswap.cancel(beetswap_id);
                         }
                     }
-                    
+
                     if let Some(QueryChannel::Get(ch)) = queries.remove(&query_id) {
                         // Send error to indicate cancellation, then drop the channel
                         let _ = ch.send(Err(anyhow!("Query cancelled")));
@@ -1305,7 +1329,17 @@ async fn swarm_poll(
                     let is_connected = swarm.is_connected(&peer_id);
                     let _ = tx.send(is_connected);
                 }
-                    }
+                Command::ConfigureBitswapPeerSelection(config, tx) => {
+                    swarm.behaviour_mut().configure_bitswap_peer_selection(config);
+                    let _ = tx.send(Ok(()));
+                }
+                Command::GetBitswapGlobalStats(tx) => {
+                    let stats = swarm.behaviour().get_bitswap_global_stats();
+                    let _ = tx.send(stats.ok_or_else(|| anyhow!("Bitswap is not enabled")));
+                }
+                Command::GetBitswapPeerRankings(tx) => {
+                    let rankings = swarm.behaviour().get_bitswap_peer_rankings();
+                    let _ = tx.send(Ok(rankings));
                 }
             }
         }

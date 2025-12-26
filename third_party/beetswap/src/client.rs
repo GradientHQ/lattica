@@ -19,11 +19,12 @@ use libp2p_swarm::{
     ConnectionHandlerEvent, ConnectionId, NotifyHandler, StreamProtocol, SubstreamProtocol, ToSwarm,
 };
 use smallvec::SmallVec;
-use tracing::debug;
+use tracing::{debug, info};
 use web_time::Instant;
 
 use crate::incoming_stream::ClientMessage;
 use crate::message::Codec;
+use crate::peer_selection::{GlobalStats, PeerDetail, PeerMetrics, PeerSelectionConfig, PeerSelector};
 use crate::proto::message::mod_Message::{BlockPresenceType, Wantlist as ProtoWantlist};
 use crate::proto::message::Message;
 use crate::utils::{box_future, convert_cid, stream_protocol, BoxFuture};
@@ -78,6 +79,12 @@ where
     next_query_id: u64,
     send_full_timer: Delay,
     new_blocks: Vec<(CidGeneric<S>, Vec<u8>)>,
+    /// Peer selection config
+    peer_selection_config: PeerSelectionConfig,
+    /// Global stats
+    global_stats: GlobalStats,
+    /// Track the first Have response time for each CID (for wait window)
+    cid_first_have_time: FnvHashMap<CidGeneric<S>, Instant>,
 }
 
 #[derive(Debug)]
@@ -97,6 +104,8 @@ struct PeerState<const S: usize> {
     sending_state: SendingState,
     wantlist: WantlistState<S>,
     send_full: bool,
+    /// Peer performance metrics
+    metrics: PeerMetrics,
 }
 
 /// Sending state of the `ClientConnectionHandler`.
@@ -149,6 +158,9 @@ where
             next_query_id: 0,
             send_full_timer: Delay::new(SEND_FULL_INTERVAL),
             new_blocks: Vec::new(),
+            peer_selection_config: PeerSelectionConfig::default(),
+            global_stats: GlobalStats::default(),
+            cid_first_have_time: FnvHashMap::default(),
         }
     }
 
@@ -162,9 +174,14 @@ where
             sending_state: SendingState::Ready,
             wantlist: WantlistState::new(),
             send_full: true,
+            metrics: PeerMetrics::default(),
         });
 
         peer.established_connections.insert(connection_id);
+
+        // When a new connection is established, retry any DontHave CIDs
+        // as this new peer might have them
+        peer.wantlist.retry_dont_have_cids(&self.wantlist);
 
         ClientConnectionHandler {
             peer_id,
@@ -188,7 +205,21 @@ where
                 .remove(&connection_id);
 
             if entry.get().established_connections.is_empty() {
-                entry.remove();
+                let peer_state = entry.remove();
+
+                let pending_cids: Vec<_> = peer_state.wantlist.pending_cids()
+                    .filter(|cid| self.wantlist.contains(cid))
+                    .copied()
+                    .collect();
+
+                if !pending_cids.is_empty() {
+                    for remaining_peer_state in self.peers.values_mut() {
+                        remaining_peer_state.wantlist.reset_cids(&pending_cids);
+                        // Also retry any DontHave CIDs since peer topology changed
+                        remaining_peer_state.wantlist.retry_dont_have_cids(&self.wantlist);
+                        remaining_peer_state.send_full = true;
+                    }
+                }
             }
         }
     }
@@ -266,6 +297,7 @@ where
                     let cid = cid.to_owned();
                     self.cid_to_queries.remove(&cid);
                     self.wantlist.remove(&cid);
+                    self.cid_first_have_time.remove(&cid);
                 }
 
                 break;
@@ -280,10 +312,14 @@ where
 
         let mut new_blocks = Vec::new();
 
-        // Update presence
+        // Update presence and track first Have time for wait window
         for (cid, block_presence) in msg.block_presences {
             match block_presence {
-                BlockPresenceType::Have => peer_state.wantlist.got_have(&cid),
+                BlockPresenceType::Have => {
+                    peer_state.wantlist.got_have(&cid);
+                    // Record first Have time for this CID (for wait window mechanism)
+                    self.cid_first_have_time.entry(cid).or_insert_with(Instant::now);
+                }
                 BlockPresenceType::DontHave => peer_state.wantlist.got_dont_have(&cid),
             }
         }
@@ -291,10 +327,43 @@ where
         // TODO: If someone sends a huge message, the executor will block! We need to
         // truncate the data, maybe even in the `message::Codec` level
         for (cid, block) in msg.blocks {
+            let block_size = block.len();
+            let is_first_response = self.wantlist.cids.contains(&cid);
+
+            // Get elapsed time from peer's request sent time, fallback to historical RTT
+            let elapsed_ms = peer_state.wantlist.get_request_sent_time(&cid)
+                .map(|t| t.elapsed().as_millis() as u64)
+                .unwrap_or(100);
+
+            // Record peer metrics
+            peer_state.metrics.record_success(block_size, elapsed_ms);
+
+            // Update global stats only for first response
+            if is_first_response {
+                self.global_stats.successful_requests += 1;
+                self.global_stats.total_bytes_received += block_size as u64;
+            }
+
+            let speed_mbps = (block_size as f64 / elapsed_ms as f64) * 1000.0 / (1024.0 * 1024.0);
+
+            tracing::info!(
+                "{} CID {} from {} | {:.2} MB | {} ms | {:.2} MB/s | score: {:.2}",
+                if is_first_response { "recv" } else { "dup" },
+                cid,
+                peer,
+                block_size as f64 / (1024.0 * 1024.0),
+                elapsed_ms,
+                speed_mbps,
+                peer_state.metrics.calculate_score()
+            );
+            
             if !self.wantlist.remove(&cid) {
                 debug_assert!(!self.cid_to_queries.contains_key(&cid));
                 continue;
             }
+
+            // Clean up wait window tracking
+            self.cid_first_have_time.remove(&cid);
 
             peer_state.wantlist.got_block(&cid);
             new_blocks.push((cid, block.clone()));
@@ -328,24 +397,119 @@ where
         let mut handler_updated = false;
         let mut peers_without_connection = SmallVec::<[PeerId; 8]>::new();
 
+        // Smart peer selection: identify candidates and count already-sent WantBlock requests
+        let mut cid_to_candidates: FnvHashMap<CidGeneric<S>, Vec<PeerId>> = FnvHashMap::default();
+        let mut cid_already_sent_count: FnvHashMap<CidGeneric<S>, usize> = FnvHashMap::default();
+        
+        for cid in &self.wantlist.cids {
+            let already_sent: usize = self.peers.iter()
+                .filter(|(_, state)| state.wantlist.has_sent_want_block(cid))
+                .count();
+            cid_already_sent_count.insert(*cid, already_sent);
+            
+            let candidates: Vec<PeerId> = self.peers.iter()
+                .filter(|(_, state)| state.wantlist.has_received_have(cid))
+                .map(|(peer_id, _)| *peer_id)
+                .collect();
+            
+            if !candidates.is_empty() {
+                cid_to_candidates.insert(*cid, candidates);
+            }
+        }
+
+        // Select optimal peers for each CID (with wait window mechanism)
+        let mut selected_peers_for_cid: FnvHashMap<CidGeneric<S>, Vec<PeerId>> = FnvHashMap::default();
+        let total_peers = self.peers.len();
+        let wait_window = Duration::from_millis(self.peer_selection_config.have_wait_window_ms);
+        let min_candidate_ratio = self.peer_selection_config.min_candidate_ratio;
+        
+        for (cid, candidate_peers) in &cid_to_candidates {
+            let already_sent = *cid_already_sent_count.get(cid).unwrap_or(&0);
+            let top_n = self.peer_selection_config.top_n;
+            
+            if already_sent >= top_n {
+                debug!("CID {} - already sent {} WantBlock, skipping (top_n={})", cid, already_sent, top_n);
+                continue;
+            }
+            
+            // Wait window check: ensure we have enough candidates before selecting
+            let should_select = if let Some(first_have_time) = self.cid_first_have_time.get(cid) {
+                let elapsed = first_have_time.elapsed();
+                let min_candidates = ((total_peers as f64) * min_candidate_ratio).ceil() as usize;
+                
+                // Start selection if:
+                // 1. Wait window has elapsed, OR
+                // 2. We have enough candidates (>= min_candidate_ratio)
+                let window_elapsed: bool = elapsed >= wait_window;
+                let enough_candidates = candidate_peers.len() >= min_candidates;
+                
+                if window_elapsed || enough_candidates {
+                    tracing::info!(
+                        "CID {} - start selection: elapsed={:?}, candidates={}, candidate_peers={:?}, min={}, window={:?}",
+                        cid, elapsed, candidate_peers.len(), candidate_peers.iter().map(|p| p.to_string()).collect::<Vec<String>>(), min_candidates, wait_window
+                    );
+                    true
+                } else {
+                    // Use trace level to reduce log spam (this is called frequently during polling)
+                    tracing::trace!(
+                        "CID {} - waiting for more candidates: elapsed={:?}, candidates={}, min={}, window={:?}",
+                        cid, elapsed, candidate_peers.len(), min_candidates, wait_window
+                    );
+                    false
+                }
+            } else {
+                // No first Have time recorded yet (shouldn't happen, but be safe)
+                true
+            };
+            
+            if !should_select {
+                continue;
+            }
+            
+            let need_to_select = top_n - already_sent;
+            
+            let candidates_with_metrics: FnvHashMap<PeerId, &PeerMetrics> = candidate_peers
+                .iter()
+                .filter_map(|peer_id| {
+                    self.peers.get(peer_id).map(|state| (*peer_id, &state.metrics))
+                })
+                .collect();
+
+            if candidates_with_metrics.is_empty() {
+                continue;
+            }
+
+            let mut temp_config = self.peer_selection_config.clone();
+            temp_config.top_n = need_to_select;
+            let selected = PeerSelector::select_top_peers(&candidates_with_metrics, &temp_config);
+
+            debug!(
+                "CID {} - sent: {}, candidates: {}, selected: {} (top_n={}, waited: {:?})",
+                cid, already_sent, candidates_with_metrics.len(), selected.len(), top_n,
+                self.cid_first_have_time.get(cid).map(|t| t.elapsed())
+            );
+
+            selected_peers_for_cid.insert(*cid, selected);
+        }
+
+        // Generate wantlist for each peer
         for (peer, state) in self.peers.iter_mut() {
-            // Clear out bad connections. In case of a bad connection we
-            // must send the full wantlist because we don't know what
-            // the remote peer has received.
+            // Clear out bad connections
             match state.sending_state {
                 SendingState::Ready => {
                     // Allowed to send
                 }
                 SendingState::Requested(instant, connection_id) => {
+                    _ = connection_id;
                     if instant.elapsed() < RECEIVE_REQUEST_TIMEOUT {
                         // Sending in progress
                         continue;
                     }
-                    // Bad connection.
-                    // `ClientConnectionHandler` didn't receive `SendWantlist` request before timeout.
-                    state.established_connections.remove(&connection_id);
+
                     state.send_full = true;
                     state.sending_state = SendingState::Ready;
+                    state.metrics.record_failure();
+                    tracing::debug!("Peer {} request timeout, recorded failure", peer);
                 }
                 SendingState::RequestReceived(..) => {
                     // Stream allocation in progress
@@ -356,11 +520,11 @@ where
                     continue;
                 }
                 SendingState::Failed(connection_id) => {
-                    // Bad connection.
-                    // `ClientConnectionHandler` failed to send wantlist because of network issues.
-                    state.established_connections.remove(&connection_id);
+                    _ = connection_id;
                     state.send_full = true;
                     state.sending_state = SendingState::Ready;
+                    state.metrics.record_failure();
+                    tracing::debug!("Peer {} sending failed, recorded failure", peer);
                 }
             };
 
@@ -369,22 +533,36 @@ where
                 continue;
             };
 
+            // Determine which CIDs this peer should receive WantBlock for
+            let should_send_want_blocks: FnvHashSet<CidGeneric<S>> = selected_peers_for_cid
+                .iter()
+                .filter(|(_, selected_peers)| selected_peers.contains(peer))
+                .map(|(cid, _)| *cid)
+                .collect();
+
             let wantlist = if state.send_full {
-                state.wantlist.generate_proto_full(&self.wantlist)
+                state.wantlist.generate_proto_full_with_filter(&self.wantlist, Some(&should_send_want_blocks))
             } else {
-                // NOTE: `generate_proto_update` alters the internal state of `WantlistState`
-                // each time it is called. So after calling it, any error should be recovered
-                // with `send_full`, even if the error happens before any byte leaves the wire.
-                state.wantlist.generate_proto_update(&self.wantlist)
+                state.wantlist.generate_proto_update_with_filter(&self.wantlist, Some(&should_send_want_blocks))
             };
 
-            // Allow empty entries to be sent when send_full flag is set.
+            // Allow empty entries to be sent when send_full flag is set
             if state.send_full {
-                // Reset flag
                 state.send_full = false;
             } else if wantlist.entries.is_empty() {
-                // No updates to be sent for this peer
                 continue;
+            }
+
+            // Log WantBlock sending
+            if !should_send_want_blocks.is_empty() {
+                for cid in &should_send_want_blocks {
+                    tracing::info!(
+                        "send WantBlock to {} for CID {} | score: {:.2}",
+                        peer,
+                        cid,
+                        state.metrics.calculate_score()
+                    );
+                }
             }
 
             self.queue.push_back(ToSwarm::NotifyHandler {
@@ -402,8 +580,50 @@ where
             self.peers.remove(&peer);
         }
 
-        // This is true if at least one handler is updated
         handler_updated
+    }
+
+    /// Set peer selection config
+    pub(crate) fn set_peer_selection_config(&mut self, config: PeerSelectionConfig) {
+        tracing::info!(
+            "Peer selection config updated: top_n={}, enabled={}, min_peers={}, randomness={}",
+            config.top_n, config.enabled, config.min_peers, config.enable_randomness
+        );
+        self.peer_selection_config = config;
+    }
+
+    /// Get peer selection config
+    pub(crate) fn get_peer_selection_config(&self) -> &PeerSelectionConfig {
+        &self.peer_selection_config
+    }
+
+    /// Get peer metrics
+    pub(crate) fn get_peer_metrics(&self, peer_id: &PeerId) -> Option<&PeerMetrics> {
+        self.peers.get(peer_id).map(|state| &state.metrics)
+    }
+
+    /// Get all peer rankings with detailed metrics
+    pub(crate) fn get_peer_rankings(&self) -> Vec<PeerDetail> {
+        let mut details: Vec<PeerDetail> = self.peers.iter()
+            .map(|(peer_id, state)| {
+                let metrics = &state.metrics;
+                PeerDetail {
+                    peer_id: peer_id.to_string(),
+                    score: metrics.calculate_score(),
+                    blocks_received: metrics.blocks_received,
+                    failures: metrics.failures,
+                    success_rate: metrics.success_rate(),
+                    avg_speed: metrics.avg_speed(),
+                }
+            })
+            .collect();
+        details.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        details
+    }
+
+    /// Get global stats
+    pub(crate) fn get_global_stats(&self) -> &GlobalStats {
+        &self.global_stats
     }
 
     /// This is polled by `Behaviour`, which is polled by `Swarm`.

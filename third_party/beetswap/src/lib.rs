@@ -28,6 +28,7 @@ mod client;
 mod incoming_stream;
 mod message;
 pub mod multihasher;
+mod peer_selection;
 mod proto;
 mod server;
 #[cfg(test)]
@@ -43,6 +44,7 @@ use crate::server::{ServerBehaviour, ServerConnectionHandler};
 
 pub use crate::builder::BehaviourBuilder;
 pub use crate::client::QueryId;
+pub use crate::peer_selection::{GlobalStats, PeerDetail, PeerMetrics, PeerSelectionConfig};
 
 /// [`NetworkBehaviour`] for Bitswap protocol.
 #[derive(Debug)]
@@ -149,6 +151,31 @@ where
     pub fn cancel(&mut self, query_id: QueryId) {
         self.client.cancel(query_id)
     }
+
+    /// Set peer selection configuration
+    pub fn set_peer_selection_config(&mut self, config: PeerSelectionConfig) {
+        self.client.set_peer_selection_config(config);
+    }
+
+    /// Get peer selection configuration
+    pub fn get_peer_selection_config(&self) -> &PeerSelectionConfig {
+        self.client.get_peer_selection_config()
+    }
+
+    /// Get performance metrics for a specific peer
+    pub fn get_peer_metrics(&self, peer_id: &PeerId) -> Option<&PeerMetrics> {
+        self.client.get_peer_metrics(peer_id)
+    }
+
+    /// Get peer rankings with detailed metrics
+    pub fn get_peer_rankings(&self) -> Vec<PeerDetail> {
+        self.client.get_peer_rankings()
+    }
+
+    /// Get global transfer statistics
+    pub fn get_global_stats(&self) -> &GlobalStats {
+        self.client.get_global_stats()
+    }
 }
 
 impl<const MAX_MULTIHASH_SIZE: usize, B> NetworkBehaviour for Behaviour<MAX_MULTIHASH_SIZE, B>
@@ -169,7 +196,7 @@ where
             peer,
             protocol: self.protocol.clone(),
             client_handler: self.client.new_connection_handler(peer, connection_id),
-            server_handler: self.server.new_connection_handler(peer),
+            server_handler: self.server.new_connection_handler(peer, connection_id),
             incoming_streams: SelectAll::new(),
             multihasher: self.multihasher.clone(),
         })
@@ -187,7 +214,7 @@ where
             peer,
             protocol: self.protocol.clone(),
             client_handler: self.client.new_connection_handler(peer, connection_id),
-            server_handler: self.server.new_connection_handler(peer),
+            server_handler: self.server.new_connection_handler(peer, connection_id),
             incoming_streams: SelectAll::new(),
             multihasher: self.multihasher.clone(),
         })
@@ -202,6 +229,7 @@ where
                 ..
             }) => {
                 self.client.on_connection_closed(peer_id, connection_id);
+                self.server.on_connection_closed(peer_id, connection_id);
             }
             _ => {}
         }
@@ -273,6 +301,7 @@ pub enum ToBehaviourEvent<const S: usize> {
 pub enum ToHandlerEvent {
     SendWantlist(ProtoWantlist),
     QueueOutgoingMessages(Vec<(Vec<u8>, Vec<u8>)>),
+    QueueOutgoingPresences(Vec<proto::message::mod_Message::BlockPresence>),
 }
 
 #[doc(hidden)]
@@ -314,6 +343,9 @@ impl<const MAX_MULTIHASH_SIZE: usize> ConnectionHandler for ConnHandler<MAX_MULT
             }
             ToHandlerEvent::QueueOutgoingMessages(data) => {
                 self.server_handler.queue_messages(data);
+            }
+            ToHandlerEvent::QueueOutgoingPresences(presences) => {
+                self.server_handler.queue_presences(presences);
             }
         }
     }
