@@ -19,7 +19,7 @@ use libp2p_swarm::{
     ConnectionHandlerEvent, ConnectionId, NotifyHandler, StreamProtocol, SubstreamProtocol, ToSwarm,
 };
 use smallvec::SmallVec;
-use tracing::{debug, info};
+use tracing::{debug};
 use web_time::Instant;
 
 use crate::incoming_stream::ClientMessage;

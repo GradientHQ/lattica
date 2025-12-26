@@ -1,43 +1,71 @@
+use super::*;
 use crate::common;
-use crate::rpc;
+use crate::common::{
+    BytesBlock, CompressionAlgorithm, CompressionLevel, QueryId, compress_data, should_compress,
+};
 use crate::fs_blockstore::FsBlockstore;
-use super::{*};
-use std::{sync::Arc, error::Error, fs};
+use crate::rpc;
 use anyhow::{Result, anyhow};
+use bincode::config::standard;
+use blockstore::Blockstore;
+use blockstore::block::Block;
 use chrono::Utc;
-use libp2p::{noise, tcp, yamux, Swarm, SwarmBuilder, identity,swarm::{SwarmEvent},
-            kad::{RecordKey,Mode, PeerRecord, Quorum, Record}, Multiaddr, multiaddr::{Protocol}, PeerId, futures::{StreamExt},
-            request_response::{OutboundRequestId}, Stream};
+use cid::Cid;
+use fnv::FnvHashMap;
+use futures::io::WriteHalf;
 use futures::{AsyncReadExt, AsyncWriteExt};
+use libp2p::{
+    Multiaddr, PeerId, Stream, Swarm, SwarmBuilder,
+    futures::StreamExt,
+    identity,
+    kad::{Mode, PeerRecord, Quorum, Record, RecordKey},
+    multiaddr::Protocol,
+    noise,
+    request_response::OutboundRequestId,
+    swarm::SwarmEvent,
+    tcp, yamux,
+};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
-use bincode::config::standard;
-use tokio::task::JoinHandle;
-use fnv::{FnvHashMap};
-use uuid::Uuid;
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
-use tokio_stream::wrappers::ReceiverStream;
 use std::time::{Duration, Instant};
+use std::{error::Error, fs, sync::Arc};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tokio::time::interval;
-use blockstore::{Blockstore};
-use blockstore::block::Block;
-use crate::common::{compress_data, should_compress, BytesBlock, CompressionAlgorithm, CompressionLevel, QueryId};
-use cid::Cid;
-use futures::io::{WriteHalf};
+use tokio_stream::wrappers::ReceiverStream;
+use uuid::Uuid;
 
-pub enum Command{
+pub enum Command {
     PutRecord(Record, Quorum, oneshot::Sender<Result<()>>),
     GetRecord(RecordKey, Quorum, oneshot::Sender<Result<Vec<PeerRecord>>>),
     RpcConnect(PeerId, oneshot::Sender<Result<()>>),
     Dial(Multiaddr, oneshot::Sender<Result<()>>),
-    RpcSend(PeerId, rpc::RpcRequest, oneshot::Sender<Result<rpc::RpcResponse>>),
+    RpcSend(
+        PeerId,
+        rpc::RpcRequest,
+        oneshot::Sender<Result<rpc::RpcResponse>>,
+    ),
     RpcGetOrCreateStreamHandle(PeerId, oneshot::Sender<Result<Arc<StreamHandle>>>),
     RpcRegister(Box<dyn rpc::RpcService>, oneshot::Sender<Result<()>>),
-    RendezvousRegister(PeerId, Option<String>, Option<u64>, oneshot::Sender<Result<()>>),
-    RendezvousDiscover(PeerId, Option<String>, Option<u64>, oneshot::Sender<Result<Vec<PeerId>>>),
+    RendezvousRegister(
+        PeerId,
+        Option<String>,
+        Option<u64>,
+        oneshot::Sender<Result<()>>,
+    ),
+    RendezvousDiscover(
+        PeerId,
+        Option<String>,
+        Option<u64>,
+        oneshot::Sender<Result<Vec<PeerId>>>,
+    ),
     GetVisibleMAddrs(oneshot::Sender<Result<Vec<Multiaddr>>>),
-    Get(Cid, oneshot::Sender<Result<(Option<PeerId>, BytesBlock)>>, oneshot::Sender<Option<QueryId>>),
+    Get(
+        Cid,
+        oneshot::Sender<Result<(Option<PeerId>, BytesBlock)>>,
+        oneshot::Sender<Option<QueryId>>,
+    ),
     CancelGet(QueryId),
     StartProviding(RecordKey, oneshot::Sender<Result<()>>),
     GetProviders(RecordKey, oneshot::Sender<Result<Vec<PeerId>>>),
@@ -159,7 +187,11 @@ impl LatticaBuilder {
         self
     }
 
-    pub fn with_compression(mut self, algorithm: CompressionAlgorithm, level: CompressionLevel) -> Self {
+    pub fn with_compression(
+        mut self,
+        algorithm: CompressionAlgorithm,
+        level: CompressionLevel,
+    ) -> Self {
         self.config.compression_algorithm = algorithm;
         self.config.compression_level = level;
         self
@@ -213,9 +245,10 @@ impl LatticaBuilder {
         }
 
         if self.config.protocol_version == "".to_string() {
-            self.config.protocol_version = format!("/{}", self.config.keypair.public().to_peer_id().to_string());
+            self.config.protocol_version =
+                format!("/{}", self.config.keypair.public().to_peer_id().to_string());
         }
-        
+
         let storage = FsBlockstore::new(self.config.clone().storage_path.into())?;
         let storage_arc = Arc::new(storage);
 
@@ -228,7 +261,8 @@ impl LatticaBuilder {
             )?
             .with_quic()
             .with_dns()?
-            .with_websocket(noise::Config::new, yamux::Config::default).await?
+            .with_websocket(noise::Config::new, yamux::Config::default)
+            .await?
             .with_relay_client(noise::Config::new, yamux::Config::default)?
             .with_behaviour(|_keypair, relay_behaviour| {
                 let relay_client = if self.config.with_relay {
@@ -258,7 +292,7 @@ impl LatticaBuilder {
 
         let bootstrap_nodes = self.config.bootstrap_nodes.clone();
         if !bootstrap_nodes.is_empty() {
-            if swarm.behaviour().is_kad_enabled(){
+            if swarm.behaviour().is_kad_enabled() {
                 if let Some(kad) = swarm.behaviour_mut().kad.as_mut() {
                     for addr in bootstrap_nodes.clone() {
                         if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
@@ -289,20 +323,18 @@ impl LatticaBuilder {
         let address_book_arc = Arc::new(RwLock::new(address_book));
         let address_book_clone = address_book_arc.clone();
 
-        let _swarm_handle = tokio::spawn(
-            swarm_poll(
-                cmd_rx,
-                swarm,
-                self.config.clone(),
-                address_book_clone,
-            )
-        );
+        let _swarm_handle = tokio::spawn(swarm_poll(
+            cmd_rx,
+            swarm,
+            self.config.clone(),
+            address_book_clone,
+        ));
 
         // nat type check
         let symmetric_nat = Arc::new(RwLock::new(None));
         common::check_symmetric_nat(symmetric_nat.clone())?;
 
-        let lattica = Lattica{
+        let lattica = Lattica {
             _swarm_handle: Arc::new(_swarm_handle),
             cmd: cmd_tx,
             config: Arc::new(self.config),
@@ -331,10 +363,10 @@ impl StreamHandle {
         let reader = Arc::new(Mutex::new(read_half));
         let writer = Arc::new(Mutex::new(write_half));
 
-        let pending_stream_calls: Arc<RwLock<HashMap<String, mpsc::Sender<Vec<u8>>>>>
-            = Arc::new(RwLock::new(HashMap::new()));
-        let pending_unary_calls: Arc<RwLock<HashMap<String, (Vec<u8>, oneshot::Sender<Vec<u8>>)>>>
-            = Arc::new(RwLock::new(HashMap::new()));
+        let pending_stream_calls: Arc<RwLock<HashMap<String, mpsc::Sender<Vec<u8>>>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let pending_unary_calls: Arc<RwLock<HashMap<String, (Vec<u8>, oneshot::Sender<Vec<u8>>)>>> =
+            Arc::new(RwLock::new(HashMap::new()));
 
         // run background task: response by request id
         let reader_clone = reader.clone();
@@ -359,23 +391,26 @@ impl StreamHandle {
                     break;
                 }
 
-
                 drop(r);
 
                 // handle frame
-                if let Ok((frame, _)) = bincode::decode_from_slice::<rpc::StreamFrame, _>(&buf, standard()) {
+                if let Ok((frame, _)) =
+                    bincode::decode_from_slice::<rpc::StreamFrame, _>(&buf, standard())
+                {
                     match frame {
                         rpc::StreamFrame::Data(msg) => {
-                                let tx_opt = {
-                                    let guard = pending_stream_clone.read().await;
-                                    guard.get(&msg.id).cloned()
-                                };
+                            let tx_opt = {
+                                let guard = pending_stream_clone.read().await;
+                                guard.get(&msg.id).cloned()
+                            };
 
-                                if let Some(tx) = tx_opt {
+                            if let Some(tx) = tx_opt {
                                 if tx.try_send(msg.data.to_vec()).is_err() {
                                     pending_stream_clone.write().await.remove(&msg.id);
                                 }
-                            } else if let Some((acc, _tx)) = pending_unary_clone.write().await.get_mut(&msg.id) {
+                            } else if let Some((acc, _tx)) =
+                                pending_unary_clone.write().await.get_mut(&msg.id)
+                            {
                                 acc.extend_from_slice(&msg.data);
                             }
                         }
@@ -383,7 +418,8 @@ impl StreamHandle {
                             if let Some(tx) = pending_stream_clone.write().await.remove(&id) {
                                 drop(tx);
                             }
-                            if let Some((data, tx)) = pending_unary_clone.write().await.remove(&id) {
+                            if let Some((data, tx)) = pending_unary_clone.write().await.remove(&id)
+                            {
                                 let _ = tx.send(data);
                             }
                         }
@@ -436,7 +472,11 @@ impl StreamHandle {
 
         // write data frame
         let chunk_size = 16 * 1024 * 1024; // 16MB peer frame
-        let total_chunks = if data.is_empty() { 0 } else { (data.len() + chunk_size - 1) / chunk_size };
+        let total_chunks = if data.is_empty() {
+            0
+        } else {
+            (data.len() + chunk_size - 1) / chunk_size
+        };
         let mut frame_buffer = Vec::with_capacity(64 * 1024 + 1024);
 
         if total_chunks == 0 {
@@ -446,7 +486,11 @@ impl StreamHandle {
                 is_end: true,
             };
             frame_buffer.clear();
-            bincode::encode_into_std_write(&rpc::StreamFrame::Data(message), &mut frame_buffer, standard())?;
+            bincode::encode_into_std_write(
+                &rpc::StreamFrame::Data(message),
+                &mut frame_buffer,
+                standard(),
+            )?;
             let frame_len = frame_buffer.len() as u32;
             w.write_all(&frame_len.to_be_bytes()).await?;
             w.write_all(&frame_buffer).await?;
@@ -464,7 +508,11 @@ impl StreamHandle {
                 };
 
                 frame_buffer.clear();
-                bincode::encode_into_std_write(&rpc::StreamFrame::Data(message), &mut frame_buffer, standard())?;
+                bincode::encode_into_std_write(
+                    &rpc::StreamFrame::Data(message),
+                    &mut frame_buffer,
+                    standard(),
+                )?;
                 let frame_len = frame_buffer.len() as u32;
                 w.write_all(&frame_len.to_be_bytes()).await?;
                 w.write_all(&frame_buffer).await?;
@@ -511,7 +559,7 @@ impl Lattica {
         self.config.keypair.public().to_peer_id()
     }
 
-    pub async fn get_record(&self, key:RecordKey,  quorum: Quorum) -> Result<Vec<PeerRecord>>{
+    pub async fn get_record(&self, key: RecordKey, quorum: Quorum) -> Result<Vec<PeerRecord>> {
         let (tx, rx) = oneshot::channel();
         self.cmd.try_send(Command::GetRecord(key, quorum, tx))?;
         rx.await?
@@ -523,7 +571,12 @@ impl Lattica {
         rx.await?
     }
 
-    pub async fn store_simple(&self, key: &str, value: Vec<u8>, expiration_time: f64) -> Result<()> {
+    pub async fn store_simple(
+        &self,
+        key: &str,
+        value: Vec<u8>,
+        expiration_time: f64,
+    ) -> Result<()> {
         let record_key = RecordKey::new(&key.to_string());
 
         let value_with_time = common::ValueWithTime {
@@ -534,12 +587,21 @@ impl Lattica {
         let serialized = bincode::encode_to_vec(&value_with_time, standard())?;
         let mut record = Record::new(record_key, serialized);
         record.publisher = Some(self.peer_id());
-        record.expires = Some(Instant::now() + Duration::from_secs((expiration_time - common::get_current_timestamp()) as u64));
+        record.expires = Some(
+            Instant::now()
+                + Duration::from_secs((expiration_time - common::get_current_timestamp()) as u64),
+        );
 
         self.put_record(record, Quorum::One).await
     }
 
-    pub async fn store_subkey(&self, key: &str, subkey: &str, value: Vec<u8>, expiration_time: f64) -> Result<()> {
+    pub async fn store_subkey(
+        &self,
+        key: &str,
+        subkey: &str,
+        value: Vec<u8>,
+        expiration_time: f64,
+    ) -> Result<()> {
         let subkey_full = format!("{}#{}", key, subkey);
         let record_key = RecordKey::new(&subkey_full);
 
@@ -551,24 +613,38 @@ impl Lattica {
         let serialized = bincode::encode_to_vec(&value_with_time, standard())?;
         let mut record = Record::new(record_key, serialized);
         record.publisher = Some(self.peer_id());
-        record.expires = Some(Instant::now() + Duration::from_secs((expiration_time - common::get_current_timestamp()) as u64));
+        record.expires = Some(
+            Instant::now()
+                + Duration::from_secs((expiration_time - common::get_current_timestamp()) as u64),
+        );
 
         self.put_record(record, Quorum::One).await?;
 
         // update subkey
-        self.update_subkey_index(key, subkey, expiration_time).await?;
+        self.update_subkey_index(key, subkey, expiration_time)
+            .await?;
 
         Ok(())
     }
 
-    async fn update_subkey_index(&self, key: &str, subkey: &str, expiration_time: f64) -> Result<()> {
+    async fn update_subkey_index(
+        &self,
+        key: &str,
+        subkey: &str,
+        expiration_time: f64,
+    ) -> Result<()> {
         let index_key = format!("{}#index", key);
         let record_key = RecordKey::new(&index_key);
 
         // try to find index
         let mut index = match self.get_record(record_key.clone(), Quorum::One).await {
             Ok(records) if !records.is_empty() => {
-                if let Ok((existing_index, _)) = bincode::decode_from_slice::<common::types::SubkeyIndex, _>(&records[0].record.value, standard()) {
+                if let Ok((existing_index, _)) =
+                    bincode::decode_from_slice::<common::types::SubkeyIndex, _>(
+                        &records[0].record.value,
+                        standard(),
+                    )
+                {
                     existing_index
                 } else {
                     common::types::SubkeyIndex {
@@ -580,7 +656,7 @@ impl Lattica {
             _ => common::types::SubkeyIndex {
                 subkeys: vec![],
                 expiration: expiration_time,
-            }
+            },
         };
 
         // update index
@@ -593,7 +669,12 @@ impl Lattica {
         let serialized = bincode::encode_to_vec(&index, standard())?;
         let mut record = Record::new(record_key, serialized);
         record.publisher = Some(self.peer_id());
-        record.expires = Some(Instant::now() + Duration::from_secs((expiration_time - common::time::get_current_timestamp()) as u64));
+        record.expires = Some(
+            Instant::now()
+                + Duration::from_secs(
+                    (expiration_time - common::time::get_current_timestamp()) as u64,
+                ),
+        );
 
         self.put_record(record, Quorum::One).await
     }
@@ -606,20 +687,35 @@ impl Lattica {
         match self.get_record(index_record_key, Quorum::One).await {
             Ok(records) if !records.is_empty() => {
                 // subkey index exist, get all subkey
-                if let Ok((index, _)) = bincode::decode_from_slice::<common::types::SubkeyIndex, _>(&records[0].record.value, standard()) {
+                if let Ok((index, _)) = bincode::decode_from_slice::<common::types::SubkeyIndex, _>(
+                    &records[0].record.value,
+                    standard(),
+                ) {
                     let mut subkey_values = Vec::new();
 
                     for subkey in index.subkeys {
                         let subkey_full = format!("{}#{}", key, subkey);
                         let subkey_record_key = RecordKey::new(&subkey_full);
 
-                        if let Ok(subkey_records) = self.get_record(subkey_record_key, Quorum::One).await {
+                        if let Ok(subkey_records) =
+                            self.get_record(subkey_record_key, Quorum::One).await
+                        {
                             if !subkey_records.is_empty() {
                                 if let Ok((value_with_time, _)) =
-                                    bincode::decode_from_slice::<common::types::ValueWithTime, _>(&subkey_records[0].record.value, standard()) {
+                                    bincode::decode_from_slice::<common::types::ValueWithTime, _>(
+                                        &subkey_records[0].record.value,
+                                        standard(),
+                                    )
+                                {
                                     // check expiration
-                                    if value_with_time.expiration_time > common::time::get_current_timestamp() {
-                                        subkey_values.push((subkey, value_with_time.value, value_with_time.expiration_time));
+                                    if value_with_time.expiration_time
+                                        > common::time::get_current_timestamp()
+                                    {
+                                        subkey_values.push((
+                                            subkey,
+                                            value_with_time.value,
+                                            value_with_time.expiration_time,
+                                        ));
                                     }
                                 }
                             }
@@ -627,7 +723,9 @@ impl Lattica {
                     }
 
                     if !subkey_values.is_empty() {
-                        return Ok(Some(common::types::DhtValue::WithSubkeys { subkeys: subkey_values }));
+                        return Ok(Some(common::types::DhtValue::WithSubkeys {
+                            subkeys: subkey_values,
+                        }));
                     }
                 }
             }
@@ -639,7 +737,11 @@ impl Lattica {
         match self.get_record(record_key, Quorum::One).await {
             Ok(records) if !records.is_empty() => {
                 if let Ok((value_with_time, _)) =
-                    bincode::decode_from_slice::<common::types::ValueWithTime, _>(&records[0].record.value, standard()) {
+                    bincode::decode_from_slice::<common::types::ValueWithTime, _>(
+                        &records[0].record.value,
+                        standard(),
+                    )
+                {
                     // check expiration
                     if value_with_time.expiration_time > common::time::get_current_timestamp() {
                         return Ok(Some(common::types::DhtValue::Simple {
@@ -720,7 +822,10 @@ impl Lattica {
 
         if !is_connected {
             // try reconnect
-            tracing::debug!("Peer {} is not connected, attempting to reconnect...", peer_id);
+            tracing::debug!(
+                "Peer {} is not connected, attempting to reconnect...",
+                peer_id
+            );
             self.try_reconnect_peer(peer_id, timeout).await?;
 
             // verify status
@@ -729,7 +834,10 @@ impl Lattica {
             let reconnected = rx2.await.unwrap_or(false);
 
             if !reconnected {
-                return Err(anyhow!("Failed to establish connection to peer {}", peer_id));
+                return Err(anyhow!(
+                    "Failed to establish connection to peer {}",
+                    peer_id
+                ));
             }
 
             tracing::info!("Successfully reconnected to peer {}", peer_id);
@@ -742,15 +850,24 @@ impl Lattica {
             drop(address_book);
 
             if !has_direct {
-                return Err(anyhow!("Only relayed connection available for peer {}", peer_id));
+                return Err(anyhow!(
+                    "Only relayed connection available for peer {}",
+                    peer_id
+                ));
             }
         }
 
         Ok(())
     }
 
-    pub async fn call(&self, peer_id: PeerId, method: String, data: Vec<u8>) -> Result<rpc::RpcResponse> {
-        self.ensure_direct_connection(&peer_id, Duration::from_secs(10)).await?;
+    pub async fn call(
+        &self,
+        peer_id: PeerId,
+        method: String,
+        data: Vec<u8>,
+    ) -> Result<rpc::RpcResponse> {
+        self.ensure_direct_connection(&peer_id, Duration::from_secs(10))
+            .await?;
 
         let (tx, rx) = oneshot::channel();
 
@@ -762,9 +879,7 @@ impl Lattica {
 
         let (final_data, final_compression) = if let Some(algo) = compression_algo {
             match compress_data(&data, algo, self.config.compression_level).await {
-                Ok(compressed_data) => {
-                    (compressed_data, Some(algo))
-                },
+                Ok(compressed_data) => (compressed_data, Some(algo)),
                 Err(e) => {
                     tracing::warn!("Failed to compress data: {}", e);
                     (data, None)
@@ -784,46 +899,68 @@ impl Lattica {
         rx.await?
     }
 
-    pub async fn call_stream(&self, peer_id: PeerId, method: String, data: Vec<u8>) -> Result<Vec<u8>> {
-        self.ensure_direct_connection(&peer_id, Duration::from_secs(10)).await?;
+    pub async fn call_stream(
+        &self,
+        peer_id: PeerId,
+        method: String,
+        data: Vec<u8>,
+    ) -> Result<Vec<u8>> {
+        self.ensure_direct_connection(&peer_id, Duration::from_secs(10))
+            .await?;
 
         let request_id = Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
-        self.cmd.try_send(Command::RpcGetOrCreateStreamHandle(peer_id, tx))?;
+        self.cmd
+            .try_send(Command::RpcGetOrCreateStreamHandle(peer_id, tx))?;
         let handle = rx.await??;
 
         // send request
         let (response_tx, response_rx) = oneshot::channel();
-        handle.register_unary_call(request_id.clone(), response_tx).await;
+        handle
+            .register_unary_call(request_id.clone(), response_tx)
+            .await;
         handle.send_request(request_id, method, data).await?;
 
         // get response
-        let result = response_rx.await
+        let result = response_rx
+            .await
             .map_err(|_| anyhow!("Response channel closed"))?;
 
         Ok(result)
     }
 
-    pub async fn call_stream_iter(&self, peer_id: PeerId, method: String, data: Vec<u8>) -> Result<(String, mpsc::Receiver<Vec<u8>>)> {
-        self.ensure_direct_connection(&peer_id, Duration::from_secs(10)).await?;
+    pub async fn call_stream_iter(
+        &self,
+        peer_id: PeerId,
+        method: String,
+        data: Vec<u8>,
+    ) -> Result<(String, mpsc::Receiver<Vec<u8>>)> {
+        self.ensure_direct_connection(&peer_id, Duration::from_secs(10))
+            .await?;
 
         let request_id = Uuid::new_v4().to_string();
         // get stream handle
         let (tx, rx) = oneshot::channel();
-        self.cmd.try_send(Command::RpcGetOrCreateStreamHandle(peer_id, tx))?;
+        self.cmd
+            .try_send(Command::RpcGetOrCreateStreamHandle(peer_id, tx))?;
         let handle = rx.await??;
 
         // send request
         let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(512);
-        handle.register_stream_call(request_id.clone(), out_tx).await;
-        handle.send_request(request_id.clone(), method, data).await?;
+        handle
+            .register_stream_call(request_id.clone(), out_tx)
+            .await;
+        handle
+            .send_request(request_id.clone(), method, data)
+            .await?;
 
         Ok((request_id, out_rx))
     }
 
     pub async fn cancel_stream_iter(&self, peer_id: PeerId, request_id: String) -> Result<()> {
         let (tx, rx) = oneshot::channel();
-        self.cmd.try_send(Command::RpcGetOrCreateStreamHandle(peer_id, tx))?;
+        self.cmd
+            .try_send(Command::RpcGetOrCreateStreamHandle(peer_id, tx))?;
 
         match rx.await {
             Ok(Ok(handle)) => {
@@ -841,15 +978,35 @@ impl Lattica {
         rx.await?
     }
 
-    pub async fn register_to_rendezvous(&mut self, rendezvous_peer: PeerId, namespace: Option<String>, ttl: Option<u64>) -> Result<()> {
+    pub async fn register_to_rendezvous(
+        &mut self,
+        rendezvous_peer: PeerId,
+        namespace: Option<String>,
+        ttl: Option<u64>,
+    ) -> Result<()> {
         let (tx, rx) = oneshot::channel();
-        self.cmd.try_send(Command::RendezvousRegister(rendezvous_peer, namespace, ttl, tx))?;
+        self.cmd.try_send(Command::RendezvousRegister(
+            rendezvous_peer,
+            namespace,
+            ttl,
+            tx,
+        ))?;
         rx.await?
     }
 
-    pub async fn discover_from_rendezvous(&mut self, rendezvous_peer: PeerId, namespace: Option<String>, limit: Option<u64>) -> Result<Vec<PeerId>> {
+    pub async fn discover_from_rendezvous(
+        &mut self,
+        rendezvous_peer: PeerId,
+        namespace: Option<String>,
+        limit: Option<u64>,
+    ) -> Result<Vec<PeerId>> {
         let (tx, rx) = oneshot::channel();
-        self.cmd.try_send(Command::RendezvousDiscover(rendezvous_peer, namespace, limit, tx))?;
+        self.cmd.try_send(Command::RendezvousDiscover(
+            rendezvous_peer,
+            namespace,
+            limit,
+            tx,
+        ))?;
         rx.await?
     }
 
@@ -857,10 +1014,17 @@ impl Lattica {
         &self.config.rendezvous_servers
     }
 
-    pub async fn auto_register_to_rendezvous(&mut self, namespace: Option<String>, ttl: Option<u64>) -> Result<()> {
+    pub async fn auto_register_to_rendezvous(
+        &mut self,
+        namespace: Option<String>,
+        ttl: Option<u64>,
+    ) -> Result<()> {
         let servers = self.config.rendezvous_servers.clone();
         for (peer_id, _addr) in servers {
-            if let Err(e) = self.register_to_rendezvous(peer_id, namespace.clone(), ttl).await {
+            if let Err(e) = self
+                .register_to_rendezvous(peer_id, namespace.clone(), ttl)
+                .await
+            {
                 tracing::warn!("Failed to register to rendezvous server {}: {}", peer_id, e);
             } else {
                 tracing::info!("Successfully registered to rendezvous server {}", peer_id);
@@ -869,26 +1033,41 @@ impl Lattica {
         Ok(())
     }
 
-    pub async fn auto_discover_from_rendezvous(&mut self, namespace: Option<String>, limit: Option<u64>) -> Result<Vec<PeerId>> {
+    pub async fn auto_discover_from_rendezvous(
+        &mut self,
+        namespace: Option<String>,
+        limit: Option<u64>,
+    ) -> Result<Vec<PeerId>> {
         let mut all_peers = Vec::new();
         let servers = self.config.rendezvous_servers.clone();
-        
+
         for (peer_id, _addr) in servers {
-            match self.discover_from_rendezvous(peer_id, namespace.clone(), limit).await {
+            match self
+                .discover_from_rendezvous(peer_id, namespace.clone(), limit)
+                .await
+            {
                 Ok(mut peers) => {
-                    tracing::info!("Discovered {} addressbook from rendezvous server {}", peers.len(), peer_id);
+                    tracing::info!(
+                        "Discovered {} addressbook from rendezvous server {}",
+                        peers.len(),
+                        peer_id
+                    );
                     all_peers.append(&mut peers);
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to discover from rendezvous server {}: {}", peer_id, e);
+                    tracing::warn!(
+                        "Failed to discover from rendezvous server {}: {}",
+                        peer_id,
+                        e
+                    );
                 }
             }
         }
-        
+
         // Remove duplicates
         all_peers.sort();
         all_peers.dedup();
-        
+
         Ok(all_peers)
     }
 
@@ -912,7 +1091,11 @@ impl Lattica {
         address_book.info(peer_id)?.rtt()
     }
 
-    pub async fn get_block(&self, cid: &Cid, timeout: Duration) -> Result<(Option<PeerId>, BytesBlock)> {
+    pub async fn get_block(
+        &self,
+        cid: &Cid,
+        timeout: Duration,
+    ) -> Result<(Option<PeerId>, BytesBlock)> {
         let (tx, rx) = oneshot::channel();
         let (query_id_tx, query_id_rx) = oneshot::channel();
         self.cmd.try_send(Command::Get(*cid, tx, query_id_tx))?;
@@ -933,7 +1116,10 @@ impl Lattica {
                 if let Some(qid) = query_id {
                     let _ = self.cmd.try_send(Command::CancelGet(qid));
                 }
-                Err(anyhow!("get_block timeout: block not found or request timed out after {:?}", timeout))
+                Err(anyhow!(
+                    "get_block timeout: block not found or request timed out after {:?}",
+                    timeout
+                ))
             }
         }
     }
@@ -973,15 +1159,21 @@ impl Lattica {
     }
 
     pub fn is_symmetric_nat(&self) -> Result<Option<bool>> {
-        let nat = self.symmetric_nat.try_read()
+        let nat = self
+            .symmetric_nat
+            .try_read()
             .map_err(|_| anyhow!("Failed to read symmetric_nat"))?;
         Ok(*nat)
     }
 
     /// Configure Bitswap peer selection strategy
-    pub async fn configure_bitswap_peer_selection(&self, config: beetswap::PeerSelectionConfig) -> Result<()> {
+    pub async fn configure_bitswap_peer_selection(
+        &self,
+        config: beetswap::PeerSelectionConfig,
+    ) -> Result<()> {
         let (tx, rx) = oneshot::channel();
-        self.cmd.try_send(Command::ConfigureBitswapPeerSelection(config, tx))?;
+        self.cmd
+            .try_send(Command::ConfigureBitswapPeerSelection(config, tx))?;
         rx.await?
     }
 
@@ -1009,17 +1201,21 @@ impl Drop for Lattica {
     }
 }
 
-
 async fn swarm_poll(
     cmd_rx: mpsc::Receiver<Command>,
     mut swarm: Swarm<LatticaBehaviour>,
     config: Config,
     address_book: Arc<RwLock<AddressBook>>,
 ) {
-    let services = Arc::new(RwLock::new(HashMap::<String, Box<dyn rpc::RpcService>>::new()));
-    let mut pending_requests: HashMap<OutboundRequestId, oneshot::Sender<Result<rpc::RpcResponse>>> = HashMap::new();
+    let services = Arc::new(RwLock::new(
+        HashMap::<String, Box<dyn rpc::RpcService>>::new(),
+    ));
+    let mut pending_requests: HashMap<
+        OutboundRequestId,
+        oneshot::Sender<Result<rpc::RpcResponse>>,
+    > = HashMap::new();
     let mut stream_control = swarm.behaviour().stream.new_control();
-    let mut incoming_streams =stream_control.accept(rpc::RPC_STREAM_PROTOCOL).unwrap();
+    let mut incoming_streams = stream_control.accept(rpc::RPC_STREAM_PROTOCOL).unwrap();
     let mut stream_handles: HashMap<PeerId, Arc<StreamHandle>> = HashMap::new();
 
     let services_stream = services.clone();
@@ -1085,132 +1281,132 @@ async fn swarm_poll(
                         return;
                     }
                     Some(e) => match e {
-                SwarmEvent::NewListenAddr { address, .. } => {
-                    tracing::info!("Listening on: {}", address.with_p2p(swarm.local_peer_id().clone()).unwrap());
-                }
-                SwarmEvent::ConnectionEstablished { peer_id, endpoint, connection_id, .. } => {
-                    let remote_addr = endpoint.get_remote_address();
-                    let remote_protocol = common::get_transport_protocol(remote_addr);
-                    let is_direct = !endpoint.get_remote_address().to_string().contains("p2p-circuit");
-
-                    if !remote_protocol.is_none() {
-                        tracing::info!("Connection established with peer: {}, via: {}, use: {:?}, is_direct: {}", peer_id, remote_addr, remote_protocol, is_direct);
-
-                        // update address book
-                        let mut address_book_guard = address_book.write().await;
-                        let source = if endpoint.is_dialer() {
-                            AddressSource::Dial
-                        } else {
-                            AddressSource::Incoming
-                        };
-                        address_book_guard.add_address(&peer_id, remote_addr.clone(), source, endpoint.is_relayed(), connection_id);
-                        address_book_guard.set_last_seen(&peer_id, Utc::now());
-
-                        // check nat travel success, remove relayed address
-                        if !endpoint.is_relayed() {
-                            if let Some(info) = address_book_guard.info(&peer_id) {
-                                for (_, _, _, relayed, cid) in info.addresses() {
-                                    if relayed {
-                                        swarm.close_connection(cid);
-                                    }
-                                }
-                            }
+                        SwarmEvent::NewListenAddr { address, .. } => {
+                            tracing::info!("Listening on: {}", address.with_p2p(swarm.local_peer_id().clone()).unwrap());
                         }
-                    }
-
-                    tracing::debug!("Added connection info to AddressBook for peer {}", peer_id);
-                }
-                SwarmEvent::ConnectionClosed { peer_id,.. } => {
-                    tracing::debug!("Connection closed with peer: {}", peer_id);
-                    swarm.behaviour_mut().connection_closed(peer_id);
-
-                    // clean stream handle
-                    if let Some(removed) = stream_handles.remove(&peer_id) {
-                        tracing::debug!("Removed stream handle for disconnected peer: {}", peer_id);
-                        drop(removed);
-                    }
-                }
-                SwarmEvent::Behaviour(event) => {
-                    match event {
-                        LatticaBehaviourEvent::Identify(identify_event) => {
-                            let mut address_book_guard = address_book.write().await;
-                            handle_identity_event(&config, identify_event, &mut swarm, &mut address_book_guard).await;
-                        }
-                        LatticaBehaviourEvent::Relay(relay_event) => {
-                            handle_relay_event(&config, &mut swarm, relay_event, &pending_relay_addrs).await;
-                        }
-                        LatticaBehaviourEvent::Dcutr(dcutr_event) => {
-                            tracing::debug!("Dcutr event: {:?}", dcutr_event);
-                        }
-                        LatticaBehaviourEvent::RequestResponse(request_event) => {
-                            handle_request_event(request_event, services.clone(), &mut swarm, &mut pending_requests, &config).await;
-                        }
-                        LatticaBehaviourEvent::Ping(ping_event) => {
-                            tracing::debug!("network::Ping {:?}", ping_event);
-                            match &ping_event.result {
-                                Ok(rtt) => {
-                                    tracing::debug!("Ping success: peer = {:?}, RTT = {:?}", ping_event.peer, rtt);
-                                    // update rtt info
-                                    let mut address_book_guard = address_book.write().await;
-                                    address_book_guard.set_rtt(&ping_event.peer, Some(*rtt));
-                                    address_book_guard.set_last_seen(&ping_event.peer, Utc::now());
-                                    tracing::debug!("Updated RTT for peer {}: {:?}", ping_event.peer, rtt);
-                                }
-                                Err(e) => {
-                                    tracing::debug!("Ping failed: peer = {:?}, error = {:?}", ping_event.peer, e);
-                                    // record ping failed
-                                    let mut address_book_guard = address_book.write().await;
-                                    address_book_guard.set_rtt(&ping_event.peer, None);
-                                    tracing::warn!("Ping failed for peer {}: {:?}", ping_event.peer, e);
-                                }
-                            }
-                        }
-                        LatticaBehaviourEvent::Kad(kad_event) => {
-                            tracing::debug!("kademlia event {:?}", kad_event);
-                            handle_kad_event(kad_event, &mut queries).await
-                        },
-                        LatticaBehaviourEvent::Rendezvous(rendezvous_event) => {
-                            tracing::debug!("rendezvous client event {:?}", rendezvous_event);
-                            if let Some(discovered_peers) = handle_rendezvous_client_event(rendezvous_event, &mut queries).await {
-                                // Auto-connect to discovered addressbook
-                                for (peer_id, addresses) in discovered_peers {
-                                    if !addresses.is_empty() {
-                                        // Try to connect using the first address with peer ID
-                                        let first_addr = &addresses[0];
-                                        let addr_with_peer = if first_addr.to_string().contains(&peer_id.to_string()) {
-                                            first_addr.clone()
-                                        } else {
-                                            first_addr.clone().with(Protocol::P2p(peer_id))
-                                        };
-                                        
-                                        tracing::debug!("Auto-connecting to discovered peer {} at {}", peer_id, addr_with_peer);
-                                        if let Err(e) = swarm.dial(addr_with_peer) {
-                                            tracing::warn!("Failed to dial discovered peer {}: {}", peer_id, e);
+                        SwarmEvent::ConnectionEstablished { peer_id, endpoint, connection_id, .. } => {
+                            let remote_addr = endpoint.get_remote_address();
+                            let remote_protocol = common::get_transport_protocol(remote_addr);
+                            let is_direct = !endpoint.get_remote_address().to_string().contains("p2p-circuit");
+        
+                            if !remote_protocol.is_none() {
+                                tracing::info!("Connection established with peer: {}, via: {}, use: {:?}, is_direct: {}", peer_id, remote_addr, remote_protocol, is_direct);
+        
+                                // update address book
+                                let mut address_book_guard = address_book.write().await;
+                                let source = if endpoint.is_dialer() {
+                                    AddressSource::Dial
+                                } else {
+                                    AddressSource::Incoming
+                                };
+                                address_book_guard.add_address(&peer_id, remote_addr.clone(), source, endpoint.is_relayed(), connection_id);
+                                address_book_guard.set_last_seen(&peer_id, Utc::now());
+        
+                                // check nat travel success, remove relayed address
+                                if !endpoint.is_relayed() {
+                                    if let Some(info) = address_book_guard.info(&peer_id) {
+                                        for (_, _, _, relayed, cid) in info.addresses() {
+                                            if relayed {
+                                                swarm.close_connection(cid);
+                                            }
                                         }
                                     }
                                 }
                             }
+        
+                            tracing::debug!("Added connection info to AddressBook for peer {}", peer_id);
                         }
-                        LatticaBehaviourEvent::Mdns(mdns_event) => {
-                            tracing::debug!("mdns event {:?}", mdns_event);
-                            handle_mdns_event(mdns_event, &mut swarm).await;
+                        SwarmEvent::ConnectionClosed { peer_id,.. } => {
+                            tracing::debug!("Connection closed with peer: {}", peer_id);
+                            swarm.behaviour_mut().connection_closed(peer_id);
+        
+                            // clean stream handle
+                            if let Some(removed) = stream_handles.remove(&peer_id) {
+                                tracing::debug!("Removed stream handle for disconnected peer: {}", peer_id);
+                                drop(removed);
+                            }
                         }
-                        LatticaBehaviourEvent::Upnp(upnp_event) => {
-                            tracing::debug!("upnp event {:?}", upnp_event);
-                            handle_upnp_event(upnp_event, &mut swarm).await;
-                        }
-                        LatticaBehaviourEvent::Gossipsub(gossipsub_event) => {
-                            tracing::debug!("gossipsub event {:?}", gossipsub_event);
-                            handle_gossipsub_event(gossipsub_event, &mut swarm, &pending_relay_addrs).await;
-                        }
-                        LatticaBehaviourEvent::Bitswap(bitswap_event) => {
-                            tracing::info!("bitswap event {:?}", bitswap_event);
-                            handle_bitswap_event(bitswap_event, &mut queries).await;
+                        SwarmEvent::Behaviour(event) => {
+                            match event {
+                                LatticaBehaviourEvent::Identify(identify_event) => {
+                                    let mut address_book_guard = address_book.write().await;
+                                    handle_identity_event(&config, identify_event, &mut swarm, &mut address_book_guard).await;
+                                }
+                                LatticaBehaviourEvent::Relay(relay_event) => {
+                                    handle_relay_event(&config, &mut swarm, relay_event, &pending_relay_addrs).await;
+                                }
+                                LatticaBehaviourEvent::Dcutr(dcutr_event) => {
+                                    tracing::debug!("Dcutr event: {:?}", dcutr_event);
+                                }
+                                LatticaBehaviourEvent::RequestResponse(request_event) => {
+                                    handle_request_event(request_event, services.clone(), &mut swarm, &mut pending_requests, &config).await;
+                                }
+                                LatticaBehaviourEvent::Ping(ping_event) => {
+                                    tracing::debug!("network::Ping {:?}", ping_event);
+                                    match &ping_event.result {
+                                        Ok(rtt) => {
+                                            tracing::debug!("Ping success: peer = {:?}, RTT = {:?}", ping_event.peer, rtt);
+                                            // update rtt info
+                                            let mut address_book_guard = address_book.write().await;
+                                            address_book_guard.set_rtt(&ping_event.peer, Some(*rtt));
+                                            address_book_guard.set_last_seen(&ping_event.peer, Utc::now());
+                                            tracing::debug!("Updated RTT for peer {}: {:?}", ping_event.peer, rtt);
+                                        }
+                                        Err(e) => {
+                                            tracing::debug!("Ping failed: peer = {:?}, error = {:?}", ping_event.peer, e);
+                                            // record ping failed
+                                            let mut address_book_guard = address_book.write().await;
+                                            address_book_guard.set_rtt(&ping_event.peer, None);
+                                            tracing::warn!("Ping failed for peer {}: {:?}", ping_event.peer, e);
+                                        }
+                                    }
+                                }
+                                LatticaBehaviourEvent::Kad(kad_event) => {
+                                    tracing::debug!("kademlia event {:?}", kad_event);
+                                    handle_kad_event(kad_event, &mut queries).await
+                                },
+                                LatticaBehaviourEvent::Rendezvous(rendezvous_event) => {
+                                    tracing::debug!("rendezvous client event {:?}", rendezvous_event);
+                                    if let Some(discovered_peers) = handle_rendezvous_client_event(rendezvous_event, &mut queries).await {
+                                        // Auto-connect to discovered addressbook
+                                        for (peer_id, addresses) in discovered_peers {
+                                            if !addresses.is_empty() {
+                                                // Try to connect using the first address with peer ID
+                                                let first_addr = &addresses[0];
+                                                let addr_with_peer = if first_addr.to_string().contains(&peer_id.to_string()) {
+                                                    first_addr.clone()
+                                                } else {
+                                                    first_addr.clone().with(Protocol::P2p(peer_id))
+                                                };
+        
+                                                tracing::debug!("Auto-connecting to discovered peer {} at {}", peer_id, addr_with_peer);
+                                                if let Err(e) = swarm.dial(addr_with_peer) {
+                                                    tracing::warn!("Failed to dial discovered peer {}: {}", peer_id, e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                LatticaBehaviourEvent::Mdns(mdns_event) => {
+                                    tracing::debug!("mdns event {:?}", mdns_event);
+                                    handle_mdns_event(mdns_event, &mut swarm).await;
+                                }
+                                LatticaBehaviourEvent::Upnp(upnp_event) => {
+                                    tracing::debug!("upnp event {:?}", upnp_event);
+                                    handle_upnp_event(upnp_event, &mut swarm).await;
+                                }
+                                LatticaBehaviourEvent::Gossipsub(gossipsub_event) => {
+                                    tracing::debug!("gossipsub event {:?}", gossipsub_event);
+                                    handle_gossipsub_event(gossipsub_event, &mut swarm, &pending_relay_addrs).await;
+                                }
+                                LatticaBehaviourEvent::Bitswap(bitswap_event) => {
+                                    tracing::info!("bitswap event {:?}", bitswap_event);
+                                    handle_bitswap_event(bitswap_event, &mut queries).await;
+                                }
+                                _ => {}
+                            }
                         }
                         _ => {}
-                    }
-                }
-                    _ => {}
                     }
                 }
             }
@@ -1223,123 +1419,125 @@ async fn swarm_poll(
                         return;
                     }
                     Some(cmd) => match cmd {
-                Command::GetRecord(key, quorum, tx) => {
-                    swarm.behaviour_mut().get_record(key, quorum, tx, &mut queries);
-                }
-                Command::PutRecord(record, quorum, tx) => {
-                    swarm.behaviour_mut().put_record(record, quorum, tx, &mut queries);
-                }
-                Command::RpcConnect(peer_id, response) => {
-                    let result = swarm.dial(peer_id).map_err(|e| anyhow!(e.to_string()));
-                    let _ = response.send(result);
-                }
-                Command::Dial(addr, response) => {
-                    let result = swarm.dial(addr).map_err(|e| anyhow!(e.to_string()));
-                    let _ = response.send(result);
-                }
-                Command::RpcSend(peer_id, request, response) => {
-                    // check direct connection
-                    if !common::has_direct_connection(&address_book, &peer_id).await {
-                        let _ = response.send(Err(anyhow!("no direct connection for peer {}", peer_id)));
-                        continue
-                    }
-                    
-                    let message = rpc::RpcMessage::Request(request);
-                    let request_id = swarm.behaviour_mut().request_response.send_request(&peer_id, message);
-                    pending_requests.insert(request_id, response);
-                }
-                Command::RpcGetOrCreateStreamHandle(peer_id, response) => {
-                    // check direct connection
-                    if !common::has_direct_connection(&address_book, &peer_id).await {
-                        stream_handles.remove(&peer_id);
-                        let _ = response.send(Err(anyhow!("no direct connection for peer {}", peer_id)));
-                        continue
-                    }
-
-                    // check stream handle
-                    if let Some(handle) = stream_handles.get(&peer_id) {
-                        if handle.is_alive().await {
-                            let _ = response.send(Ok(handle.clone()));
-                            continue
-                        } else {
-                            stream_handles.remove(&peer_id);
+                        Command::GetRecord(key, quorum, tx) => {
+                            swarm.behaviour_mut().get_record(key, quorum, tx, &mut queries);
+                        }
+                        Command::PutRecord(record, quorum, tx) => {
+                            swarm.behaviour_mut().put_record(record, quorum, tx, &mut queries);
+                        }
+                        Command::RpcConnect(peer_id, response) => {
+                            let result = swarm.dial(peer_id).map_err(|e| anyhow!(e.to_string()));
+                            let _ = response.send(result);
+                        }
+                        Command::Dial(addr, response) => {
+                            let result = swarm.dial(addr).map_err(|e| anyhow!(e.to_string()));
+                            let _ = response.send(result);
+                        }
+                        Command::RpcSend(peer_id, request, response) => {
+                            // check direct connection
+                            if !common::has_direct_connection(&address_book, &peer_id).await {
+                                let _ = response.send(Err(anyhow!("no direct connection for peer {}", peer_id)));
+                                continue
+                            }
+        
+                            let message = rpc::RpcMessage::Request(request);
+                            let request_id = swarm.behaviour_mut().request_response.send_request(&peer_id, message);
+                            pending_requests.insert(request_id, response);
+                        }
+                        Command::RpcGetOrCreateStreamHandle(peer_id, response) => {
+                            // check direct connection
+                            if !common::has_direct_connection(&address_book, &peer_id).await {
+                                stream_handles.remove(&peer_id);
+                                let _ = response.send(Err(anyhow!("no direct connection for peer {}", peer_id)));
+                                continue
+                            }
+        
+                            // check stream handle
+                            if let Some(handle) = stream_handles.get(&peer_id) {
+                                if handle.is_alive().await {
+                                    let _ = response.send(Ok(handle.clone()));
+                                    continue
+                                } else {
+                                    stream_handles.remove(&peer_id);
+                                }
+                            }
+        
+                            // create stream handle
+                            let stream_control = swarm.behaviour().stream.new_control();
+        
+                            match handle_stream_request(peer_id, stream_control).await {
+                                Ok(stream) => {
+                                    let handle = Arc::new(StreamHandle::new(stream, peer_id));
+                                    stream_handles.insert(peer_id, handle.clone());
+                                    let _ = response.send(Ok(handle));
+                                }
+                                Err(e) => {
+                                    let _ = response.send(Err(e));
+                                }
+                            }
+                        }
+                        Command::RpcRegister(service, response) => {
+                            let service_name = service.service_name().to_string();
+                            let mut services_guard = services.write().await;
+                            services_guard.insert(service_name.clone(), service);
+                            let _ = response.send(Ok(()));
+                        }
+                        Command::RendezvousRegister(rendezvous_peer, namespace, ttl, response) => {
+                            swarm.behaviour_mut().register_to_rendezvous(rendezvous_peer, namespace, ttl, response, &mut queries);
+                        }
+                        Command::RendezvousDiscover(rendezvous_peer, namespace, limit, response) => {
+                            swarm.behaviour_mut().discover_from_rendezvous(rendezvous_peer, namespace, limit, response, &mut queries);
+                        }
+                        Command::GetVisibleMAddrs(tx) => {
+                            let result = swarm.external_addresses()
+                                .map(|addr| addr.clone())
+                                .collect::<Vec<Multiaddr>>();
+                            let _ = tx.send(Ok(result));
+                        }
+                        Command::Get(cid, tx, query_id_tx) => {
+                            // get() returns Option<QueryId>, send it back so caller can cancel if needed
+                            let query_id = swarm.behaviour_mut().get(cid, &mut queries, tx);
+                            let _ = query_id_tx.send(query_id);
+                        }
+                        Command::CancelGet(query_id) => {
+                            if let Some(beetswap_id) = query_id.as_beetswap() {
+                                if let Some(bitswap) = swarm.behaviour_mut().bitswap.as_mut() {
+                                    bitswap.cancel(beetswap_id);
+                                }
+                            }
+        
+                            if let Some(QueryChannel::Get(ch)) = queries.remove(&query_id) {
+                                // Send error to indicate cancellation, then drop the channel
+                                let _ = ch.send(Err(anyhow!("Query cancelled")));
+                            }
+                        }
+                        Command::StartProviding(key, tx) => {
+                            swarm.behaviour_mut().start_providing(key, tx, &mut queries);
+                        }
+                        Command::GetProviders(key, tx) => {
+                            swarm.behaviour_mut().get_providers(key, tx, &mut queries);
+                        }
+                        Command::StopProviding(key, tx) => {
+                            swarm.behaviour_mut().stop_providing(key, tx);
+                        }
+                        Command::CheckConnection(peer_id, tx) => {
+                            // check peer connection
+                            let is_connected = swarm.is_connected(&peer_id);
+                            let _ = tx.send(is_connected);
+                        }
+                        Command::ConfigureBitswapPeerSelection(config, tx) => {
+                            swarm.behaviour_mut().configure_bitswap_peer_selection(config);
+                            let _ = tx.send(Ok(()));
+                        }
+                        Command::GetBitswapGlobalStats(tx) => {
+                            let stats = swarm.behaviour().get_bitswap_global_stats();
+                            let _ = tx.send(stats.ok_or_else(|| anyhow!("Bitswap is not enabled")));
+                        }
+                        Command::GetBitswapPeerRankings(tx) => {
+                            let rankings = swarm.behaviour().get_bitswap_peer_rankings();
+                            let _ = tx.send(Ok(rankings));
                         }
                     }
-
-                    // create stream handle
-                    let stream_control = swarm.behaviour().stream.new_control();
-
-                    match handle_stream_request(peer_id, stream_control).await {
-                        Ok(stream) => {
-                            let handle = Arc::new(StreamHandle::new(stream, peer_id));
-                            stream_handles.insert(peer_id, handle.clone());
-                            let _ = response.send(Ok(handle));
-                        }
-                        Err(e) => {
-                            let _ = response.send(Err(e));
-                        }
-                    }
-                }
-                Command::RpcRegister(service, response) => {
-                    let service_name = service.service_name().to_string();
-                    let mut services_guard = services.write().await;
-                    services_guard.insert(service_name.clone(), service);
-                    let _ = response.send(Ok(()));
-                }
-                Command::RendezvousRegister(rendezvous_peer, namespace, ttl, response) => {
-                    swarm.behaviour_mut().register_to_rendezvous(rendezvous_peer, namespace, ttl, response, &mut queries);
-                }
-                Command::RendezvousDiscover(rendezvous_peer, namespace, limit, response) => {
-                    swarm.behaviour_mut().discover_from_rendezvous(rendezvous_peer, namespace, limit, response, &mut queries);
-                }
-                Command::GetVisibleMAddrs(tx) => {
-                    let result = swarm.external_addresses()
-                        .map(|addr| addr.clone())
-                        .collect::<Vec<Multiaddr>>();
-                    let _ = tx.send(Ok(result));
-                }
-                Command::Get(cid, tx, query_id_tx) => {
-                    // get() returns Option<QueryId>, send it back so caller can cancel if needed
-                    let query_id = swarm.behaviour_mut().get(cid, &mut queries, tx);
-                    let _ = query_id_tx.send(query_id);
-                }
-                Command::CancelGet(query_id) => {
-                    if let Some(beetswap_id) = query_id.as_beetswap() {
-                        if let Some(bitswap) = swarm.behaviour_mut().bitswap.as_mut() {
-                            bitswap.cancel(beetswap_id);
-                        }
-                    }
-
-                    if let Some(QueryChannel::Get(ch)) = queries.remove(&query_id) {
-                        // Send error to indicate cancellation, then drop the channel
-                        let _ = ch.send(Err(anyhow!("Query cancelled")));
-                    }
-                }
-                Command::StartProviding(key, tx) => {
-                    swarm.behaviour_mut().start_providing(key, tx, &mut queries);
-                }
-                Command::GetProviders(key, tx) => {
-                    swarm.behaviour_mut().get_providers(key, tx, &mut queries);
-                }
-                Command::StopProviding(key, tx) => {
-                    swarm.behaviour_mut().stop_providing(key, tx);
-                }
-                Command::CheckConnection(peer_id, tx) => {
-                    // check peer connection
-                    let is_connected = swarm.is_connected(&peer_id);
-                    let _ = tx.send(is_connected);
-                }
-                Command::ConfigureBitswapPeerSelection(config, tx) => {
-                    swarm.behaviour_mut().configure_bitswap_peer_selection(config);
-                    let _ = tx.send(Ok(()));
-                }
-                Command::GetBitswapGlobalStats(tx) => {
-                    let stats = swarm.behaviour().get_bitswap_global_stats();
-                    let _ = tx.send(stats.ok_or_else(|| anyhow!("Bitswap is not enabled")));
-                }
-                Command::GetBitswapPeerRankings(tx) => {
-                    let rankings = swarm.behaviour().get_bitswap_peer_rankings();
-                    let _ = tx.send(Ok(rankings));
                 }
             }
         }
