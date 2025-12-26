@@ -42,6 +42,7 @@ pub enum Command{
     StartProviding(RecordKey, oneshot::Sender<Result<()>>),
     GetProviders(RecordKey, oneshot::Sender<Result<Vec<PeerId>>>),
     StopProviding(RecordKey, oneshot::Sender<Result<()>>),
+    CheckConnection(PeerId, oneshot::Sender<bool>),
 }
 
 #[derive(Clone)]
@@ -668,7 +669,86 @@ impl Lattica {
         rx.await?
     }
 
+    // try reconnect to peer
+    async fn try_reconnect_peer(&self, peer_id: &PeerId, _timeout: Duration) -> Result<()> {
+        let address_book = self.address_book.read().await;
+        let peer_info = address_book.info(peer_id);
+        drop(address_book);
+
+        if let Some(info) = peer_info {
+            // 1. try direct connect
+            for (addr, _, _, is_relayed, _) in info.addresses() {
+                if !is_relayed {
+                    tracing::debug!("Attempting direct connection to {}: {}", peer_id, addr);
+                    let (tx, rx) = oneshot::channel();
+                    if let Ok(_) = self.cmd.try_send(Command::Dial(addr.clone(), tx)) {
+                        // wait for connection
+                        if let Ok(_) = tokio::time::timeout(Duration::from_secs(5), rx).await {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
+            // 2. direct failed, try relay
+            for (addr, _, _, is_relayed, _) in info.addresses() {
+                if is_relayed {
+                    tracing::info!("Attempting relayed connection to {}: {}", peer_id, addr);
+                    let (tx, rx) = oneshot::channel();
+                    if let Ok(_) = self.cmd.try_send(Command::Dial(addr.clone(), tx)) {
+                        if let Ok(_) = tokio::time::timeout(Duration::from_secs(5), rx).await {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+
+        Err(anyhow!("Failed to reconnect to peer {}", peer_id))
+    }
+
+    async fn ensure_direct_connection(&self, peer_id: &PeerId, timeout: Duration) -> Result<()> {
+        // check swarm
+        let (tx, rx) = oneshot::channel();
+        self.cmd.try_send(Command::CheckConnection(*peer_id, tx))?;
+        let is_connected = rx.await.unwrap_or(false);
+
+        if !is_connected {
+            // try reconnect
+            tracing::debug!("Peer {} is not connected, attempting to reconnect...", peer_id);
+            self.try_reconnect_peer(peer_id, timeout).await?;
+            
+            // verify status
+            let (tx2, rx2) = oneshot::channel();
+            self.cmd.try_send(Command::CheckConnection(*peer_id, tx2))?;
+            let reconnected = rx2.await.unwrap_or(false);
+            
+            if !reconnected {
+                return Err(anyhow!("Failed to establish connection to peer {}", peer_id));
+            }
+            
+            tracing::info!("Successfully reconnected to peer {}", peer_id);
+        }
+
+        // check direct connection
+        let address_book = self.address_book.read().await;
+        if let Some(info) = address_book.info(peer_id) {
+            let has_direct = info.addresses().any(|(_, _, _, is_relayed, _)| !is_relayed);
+            drop(address_book);
+            
+            if !has_direct {
+                return Err(anyhow!("Only relayed connection available for peer {}", peer_id));
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn call(&self, peer_id: PeerId, method: String, data: Vec<u8>) -> Result<rpc::RpcResponse> {
+        self.ensure_direct_connection(&peer_id, Duration::from_secs(10)).await?;
+
         let (tx, rx) = oneshot::channel();
 
         let compression_algo = if should_compress(data.len(), self.config.compression_algorithm) {
@@ -702,6 +782,8 @@ impl Lattica {
     }
 
     pub async fn call_stream(&self, peer_id: PeerId, method: String, data: Vec<u8>) -> Result<Vec<u8>> {
+        self.ensure_direct_connection(&peer_id, Duration::from_secs(10)).await?;
+
         let request_id = Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         self.cmd.try_send(Command::RpcGetOrCreateStreamHandle(peer_id, tx))?;
@@ -720,6 +802,8 @@ impl Lattica {
     }
 
     pub async fn call_stream_iter(&self, peer_id: PeerId, method: String, data: Vec<u8>) -> Result<(String, mpsc::Receiver<Vec<u8>>)> {
+        self.ensure_direct_connection(&peer_id, Duration::from_secs(10)).await?;
+
         let request_id = Uuid::new_v4().to_string();
         // get stream handle
         let (tx, rx) = oneshot::channel();
@@ -947,7 +1031,7 @@ async fn swarm_poll(
                 for addr in &config.bootstrap_nodes {
                     if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
                         if !swarm.is_connected(&peer_id) {
-                            tracing::info!("Bootstrap node {} disconnected, reconnecting...", peer_id);
+                            tracing::debug!("Bootstrap node {} disconnected, reconnecting...", peer_id);
                             if let Err(e) = swarm.dial(addr.clone()) {
                                 tracing::warn!("Failed to reconnect to bootstrap {}: {:?}", peer_id, e);
                             }
@@ -959,7 +1043,7 @@ async fn swarm_poll(
                     for addr in &config.relay_servers {
                         if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
                             if !swarm.is_connected(&peer_id) {
-                                tracing::info!("Relay server {} disconnected, reconnecting...", peer_id);
+                                tracing::debug!("Relay server {} disconnected, reconnecting...", peer_id);
                                 let circuit_addr = addr.clone().with(Protocol::P2pCircuit);
                                 if let Err(e) = swarm.listen_on(circuit_addr) {
                                     tracing::warn!("Failed to reconnect to relay {}: {:?}", peer_id, e);
@@ -1013,8 +1097,14 @@ async fn swarm_poll(
                     tracing::debug!("Added connection info to AddressBook for peer {}", peer_id);
                 }
                 SwarmEvent::ConnectionClosed { peer_id,.. } => {
-                    tracing::debug!("swarm stream closed, terminating {:?}", e);
+                    tracing::debug!("Connection closed with peer: {}", peer_id);
                     swarm.behaviour_mut().connection_closed(peer_id);
+                    
+                    // clean stream handle
+                    if let Some(removed) = stream_handles.remove(&peer_id) {
+                        tracing::debug!("Removed stream handle for disconnected peer: {}", peer_id);
+                        drop(removed);
+                    }
                 }
                 SwarmEvent::Behaviour(event) => {
                     match event {
@@ -1209,6 +1299,11 @@ async fn swarm_poll(
                 }
                 Command::StopProviding(key, tx) => {
                     swarm.behaviour_mut().stop_providing(key, tx);
+                }
+                Command::CheckConnection(peer_id, tx) => {
+                    // check peer connection
+                    let is_connected = swarm.is_connected(&peer_id);
+                    let _ = tx.send(is_connected);
                 }
                     }
                 }
