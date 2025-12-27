@@ -253,6 +253,103 @@ class Lattica:
         except Exception as e:
             raise RuntimeError(f"Failed to check is_symmetric_nat error: {e}")
 
+    def configure_bitswap_peer_selection(
+        self,
+        top_n: int = 3,
+        enabled: bool = True,
+        min_peers: int = 2,
+        enable_randomness: bool = True,
+        have_wait_window_ms: int = 100,
+        min_candidate_ratio: float = 0.3
+    ) -> None:
+        """Configure Bitswap peer selection strategy.
+        
+        Args:
+            top_n: Number of top peers to select
+            enabled: Enable smart selection
+            min_peers: Minimum peers threshold
+            enable_randomness: Enable randomness in selection
+            have_wait_window_ms: Wait window in ms after first Have response before selecting peers.
+                This allows more peers to respond, ensuring better selection. Default: 100ms
+            min_candidate_ratio: Minimum candidate ratio (0.0-1.0) before starting selection.
+                Selection starts when candidates >= total_peers * min_candidate_ratio. Default: 0.3
+        """
+        try:
+            self._lattica_instance.configure_bitswap_peer_selection(
+                top_n, enabled, min_peers, enable_randomness, 
+                have_wait_window_ms, min_candidate_ratio
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to configure bitswap peer selection: {e}")
+
+    def get_bitswap_global_stats(self) -> dict:
+        """Get Bitswap global statistics.
+        
+        Returns:
+            dict with total_requests, successful_requests, failed_requests, total_bytes_received
+        """
+        try:
+            return self._lattica_instance.get_bitswap_global_stats()
+        except Exception as e:
+            raise RuntimeError(f"Failed to get bitswap global stats: {e}")
+
+    def get_bitswap_peer_rankings(self) -> List[dict]:
+        """Get Bitswap peer rankings with detailed metrics.
+        
+        Returns:
+            List of dicts sorted by score descending, each containing:
+            - peer_id: Peer ID string
+            - score: Composite score (0-100)
+            - blocks_received: Number of successfully received blocks
+            - failures: Number of failures
+            - success_rate: Success rate (0.0-1.0)
+            - avg_speed: Average speed in bytes/sec
+        """
+        try:
+            return self._lattica_instance.get_bitswap_peer_rankings()
+        except Exception as e:
+            raise RuntimeError(f"Failed to get bitswap peer rankings: {e}")
+
+    def print_bitswap_stats(self) -> None:
+        """Print Bitswap stats report to stdout.
+        
+        This method combines get_bitswap_global_stats() and get_bitswap_peer_rankings()
+        to display a formatted statistics report in Python.
+        """
+        try:
+            # Get global stats
+            stats = self.get_bitswap_global_stats()
+            total_requests = stats.get('successful_requests', 0) + stats.get('failed_requests', 0)
+            success_rate = (stats.get('successful_requests', 0) / total_requests * 100) if total_requests > 0 else 0.0
+            bytes_mb = stats.get('total_bytes_received', 0) / (1024 * 1024)
+            
+            print(f"\n{'='*100}")
+            print("Bitswap Statistics Report")
+            print(f"{'='*100}")
+            print(f"  Total Requests:      {total_requests}")
+            print(f"  Successful:          {stats.get('successful_requests', 0)}")
+            print(f"  Failed:              {stats.get('failed_requests', 0)}")
+            print(f"  Success Rate:        {success_rate:.2f}%")
+            print(f"  Total Received:      {bytes_mb:.2f} MB")
+            
+            # Get peer rankings with details
+            rankings = self.get_bitswap_peer_rankings()
+            if rankings:
+                print(f"\nTop {min(len(rankings), 10)} Peers:")
+                print(f"  {'#':<3} {'Peer ID':<54} {'Score':>7} {'Success':>8} {'Fail':>5} {'Rate':>7} {'Speed':>12}")
+                print(f"  {'-'*3} {'-'*54} {'-'*7} {'-'*8} {'-'*5} {'-'*7} {'-'*12}")
+                for i, peer in enumerate(rankings[:10], 1):
+                    peer_id = peer['peer_id']
+                    display_id = peer_id[:52] + ".." if len(peer_id) > 54 else peer_id
+                    speed_mb = peer['avg_speed'] / (1024 * 1024)
+                    rate_pct = peer['success_rate'] * 100
+                    print(f"  {i:<3} {display_id:<54} {peer['score']:>7.2f} {peer['blocks_received']:>8} {peer['failures']:>5} {rate_pct:>6.1f}% {speed_mb:>9.2f}MB/s")
+            else:
+                print("\n  No peer data available.")
+            print(f"{'='*100}\n")
+        except Exception as e:
+            raise RuntimeError(f"Failed to print bitswap stats: {e}")
+
     def __enter__(self):
         self._ensure_initialized()
         return self

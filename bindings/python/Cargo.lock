@@ -513,6 +513,7 @@ dependencies = [
  "libp2p-swarm",
  "multihash-codetable",
  "quick-protobuf",
+ "rand 0.8.5",
  "smallvec",
  "thiserror 1.0.69",
  "time",

@@ -1,14 +1,20 @@
 use std::collections::hash_map;
+use std::time::Duration;
 
 use cid::CidGeneric;
 use fnv::{FnvHashMap, FnvHashSet};
+use web_time::Instant;
 
 use crate::message::{new_cancel_entry, new_want_block_entry, new_want_have_entry};
 use crate::proto::message::mod_Message::Wantlist as ProtoWantlist;
 
+/// Time threshold for keeping sent_time_cache entries after CID is removed from wantlist.
+/// This allows accurate timing calculation for duplicate blocks that arrive after the first response.
+const SENT_TIME_CACHE_TTL: Duration = Duration::from_secs(600);
+
 #[derive(Debug)]
 pub(crate) struct Wantlist<const S: usize> {
-    cids: FnvHashSet<CidGeneric<S>>,
+    pub(crate) cids: FnvHashSet<CidGeneric<S>>,
     revision: u64,
     set_send_dont_have: bool,
 }
@@ -39,16 +45,23 @@ impl<const S: usize> Wantlist<S> {
             false
         }
     }
+
+    pub(crate) fn contains(&self, cid: &CidGeneric<S>) -> bool {
+        self.cids.contains(cid)
+    }
 }
 
 #[derive(Debug)]
 pub(crate) struct WantlistState<const S: usize> {
     req_state: FnvHashMap<CidGeneric<S>, WantReqState>,
+    /// Independent time cache for request start times, not affected by retain()
+    /// Keeps recent entries to support dup block timing even after CID removal
+    sent_time_cache: FnvHashMap<CidGeneric<S>, Instant>,
     force_update: bool,
     synced_revision: u64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq)]
 enum WantReqState {
     SentWantHave,
     GotHave,
@@ -61,6 +74,7 @@ impl<const S: usize> WantlistState<S> {
     pub(crate) fn new() -> Self {
         WantlistState {
             req_state: FnvHashMap::default(),
+            sent_time_cache: FnvHashMap::default(),
             force_update: false,
             synced_revision: 0,
         }
@@ -73,63 +87,144 @@ impl<const S: usize> WantlistState<S> {
     pub(crate) fn got_have(&mut self, cid: &CidGeneric<S>) {
         self.req_state
             .entry(cid.to_owned())
-            .and_modify(|state| *state = WantReqState::GotHave);
+            .and_modify(|state| {
+                // Only update if in SentWantHave state, preserve SentWantBlock/GotBlock
+                if *state == WantReqState::SentWantHave {
+                    *state = WantReqState::GotHave;
+                }
+            });
         self.force_update = true;
     }
 
     pub(crate) fn got_dont_have(&mut self, cid: &CidGeneric<S>) {
         self.req_state
             .entry(cid.to_owned())
-            .and_modify(|state| *state = WantReqState::GotDontHave);
+            .and_modify(|state| {
+                // Only update if in SentWantHave state, preserve SentWantBlock/GotBlock
+                if *state == WantReqState::SentWantHave {
+                    *state = WantReqState::GotDontHave;
+                }
+            });
+        // Don't remove sent_time_cache here - let TTL-based cleanup handle it uniformly
     }
 
     pub(crate) fn got_block(&mut self, cid: &CidGeneric<S>) {
         self.req_state
             .entry(cid.to_owned())
-            .and_modify(|state| *state = WantReqState::GotBlock);
+            .and_modify(|state| {
+                *state = WantReqState::GotBlock;
+            });
+    }
+
+    /// Check if Have response was received (for candidate identification)
+    /// Only returns true for GotHave state, not SentWantBlock
+    pub(crate) fn has_received_have(&self, cid: &CidGeneric<S>) -> bool {
+        self.req_state.get(cid) == Some(&WantReqState::GotHave)
+    }
+    
+    /// Check if WantBlock was already sent
+    pub(crate) fn has_sent_want_block(&self, cid: &CidGeneric<S>) -> bool {
+        self.req_state.get(cid) == Some(&WantReqState::SentWantBlock)
+    }
+
+    /// Get the time when request was initiated for this CID and clear cache entry
+    pub(crate) fn get_request_sent_time(&self, cid: &CidGeneric<S>) -> Option<Instant> {
+        // Return a copy - cache is cleaned up elsewhere (got_block, got_dont_have, retain)
+        self.sent_time_cache.get(cid).copied()
+    }
+
+    pub(crate) fn pending_cids(&self) -> impl Iterator<Item = &CidGeneric<S>> {
+        self.req_state.iter()
+            .filter(|(_, state)| !matches!(state, WantReqState::GotBlock))
+            .map(|(cid, _)| cid)
+    }
+
+    pub(crate) fn reset_cids(&mut self, cids: &[CidGeneric<S>]) {
+        for cid in cids {
+            if let Some(state) = self.req_state.get_mut(cid) {
+                *state = WantReqState::SentWantHave;
+            }
+        }
+        self.force_update = true;
+    }
+
+    /// Reset all GotDontHave CIDs back to SentWantHave to retry
+    /// This is useful when peers change or after some time has passed
+    pub(crate) fn retry_dont_have_cids(&mut self, wantlist: &Wantlist<S>) {
+        let mut updated = false;
+        for (cid, state) in self.req_state.iter_mut() {
+            if matches!(state, WantReqState::GotDontHave) && wantlist.cids.contains(cid) {
+                *state = WantReqState::SentWantHave;
+                updated = true;
+            }
+        }
+        if updated {
+            self.force_update = true;
+        }
     }
 
     pub(crate) fn generate_proto_full(&mut self, wantlist: &Wantlist<S>) -> ProtoWantlist {
-        // Remove canceled requests or received blocks
-        self.req_state.retain(|cid, _| wantlist.cids.contains(cid));
+        self.generate_proto_full_with_filter(wantlist, None)
+    }
 
-        // Add new entries
+    /// Generate full wantlist with selective WantBlock sending
+    pub(crate) fn generate_proto_full_with_filter(
+        &mut self,
+        wantlist: &Wantlist<S>,
+        should_send_want_block: Option<&FnvHashSet<CidGeneric<S>>>,
+    ) -> ProtoWantlist {
+        self.req_state.retain(|cid, _| wantlist.cids.contains(cid));
+        // Keep sent_time_cache entries that are either in wantlist or recent (for dup block timing)
+        let now = Instant::now();
+        self.sent_time_cache.retain(|cid, sent_time| {
+            wantlist.cids.contains(cid) || now.duration_since(*sent_time) < SENT_TIME_CACHE_TTL
+        });
+
+        let now = Instant::now();
         for cid in &wantlist.cids {
-            self.req_state
-                .entry(cid.to_owned())
-                .or_insert(WantReqState::SentWantHave);
+            if let std::collections::hash_map::Entry::Vacant(e) = self.req_state.entry(cid.to_owned()) {
+                e.insert(WantReqState::SentWantHave);
+                // Record in cache when first sending WantHave
+                self.sent_time_cache.entry(cid.to_owned()).or_insert(now);
+            }
         }
 
         let mut entries = Vec::new();
 
         for (cid, req_state) in self.req_state.iter_mut() {
-            match *req_state {
+            match req_state {
                 WantReqState::SentWantHave => {
                     entries.push(new_want_have_entry(cid, wantlist.set_send_dont_have));
                 }
                 WantReqState::GotHave => {
-                    entries.push(new_want_block_entry(cid, wantlist.set_send_dont_have));
-                    *req_state = WantReqState::SentWantBlock;
+                    let should_send = should_send_want_block.map(|set| set.contains(cid)).unwrap_or(true);
+                    if should_send {
+                        entries.push(new_want_block_entry(cid, wantlist.set_send_dont_have));
+                        *req_state = WantReqState::SentWantBlock;
+                    } else {
+                        entries.push(new_want_have_entry(cid, wantlist.set_send_dont_have));
+                    }
                 }
-                WantReqState::GotDontHave => {
-                    // Nothing to request
-                }
+                WantReqState::GotDontHave | WantReqState::GotBlock => {}
                 WantReqState::SentWantBlock => {
                     entries.push(new_want_block_entry(cid, wantlist.set_send_dont_have));
-                }
-                WantReqState::GotBlock => {
-                    // Nothing to request
                 }
             }
         }
 
-        ProtoWantlist {
-            entries,
-            full: true,
-        }
+        ProtoWantlist { entries, full: true }
     }
 
     pub(crate) fn generate_proto_update(&mut self, wantlist: &Wantlist<S>) -> ProtoWantlist {
+        self.generate_proto_update_with_filter(wantlist, None)
+    }
+
+    /// Generate incremental wantlist with selective WantBlock sending
+    pub(crate) fn generate_proto_update_with_filter(
+        &mut self,
+        wantlist: &Wantlist<S>,
+        should_send_want_block: Option<&FnvHashSet<CidGeneric<S>>>,
+    ) -> ProtoWantlist {
         if self.is_updated(wantlist) {
             return ProtoWantlist::default();
         }
@@ -137,62 +232,60 @@ impl<const S: usize> WantlistState<S> {
         let mut entries = Vec::new();
         let mut removed = Vec::new();
 
-        // Update existing entries
         for (cid, req_state) in self.req_state.iter_mut() {
-            match (wantlist.cids.contains(cid), *req_state) {
-                // If CID is not in the wantlist that means we received
-                // its block from another peer. If we received a block
-                // from this peer too then we don't need to send a cancel
-                // message back.
+            let in_wantlist = wantlist.cids.contains(cid);
+            match (in_wantlist, &*req_state) {
                 (false, WantReqState::GotBlock) => {
-                    // Remove CID request state
                     removed.push(cid.to_owned());
                 }
-
-                // If CID is not in the wantlist that means we received
-                // its block from another peer. We need to send a cancel
-                // message to this peer.
                 (false, _) => {
-                    // Remove CID request state
                     removed.push(cid.to_owned());
-                    // Add a cancel mesage
                     entries.push(new_cancel_entry(cid));
                 }
-
-                // WantHave was requested. We need a response to proceed further.
                 (true, WantReqState::SentWantHave) => {}
-
                 (true, WantReqState::GotHave) => {
-                    entries.push(new_want_block_entry(cid, wantlist.set_send_dont_have));
-                    *req_state = WantReqState::SentWantBlock;
+                    let should_send = should_send_want_block.map(|set| set.contains(cid)).unwrap_or(true);
+                    if should_send {
+                        entries.push(new_want_block_entry(cid, wantlist.set_send_dont_have));
+                        *req_state = WantReqState::SentWantBlock;
+                    }
                 }
-
-                // Server responsed with DontHave. We have nothing else to do.
                 (true, WantReqState::GotDontHave) => {}
-
-                // Block was requested
                 (true, WantReqState::SentWantBlock) => {}
-
-                // Block was received
                 (true, WantReqState::GotBlock) => {}
             }
         }
 
-        // Remove canceled requests or received blocks
         for cid in removed {
             self.req_state.remove(&cid);
+            // Don't remove sent_time_cache here - let the TTL-based cleanup handle it
+            // This allows accurate timing for dup blocks that arrive after CID removal
         }
 
-        // Add new entries
+        // TTL-based cleanup for sent_time_cache to prevent memory leaks
+        let now = Instant::now();
+        self.sent_time_cache.retain(|cid, sent_time| {
+            wantlist.cids.contains(cid) || now.duration_since(*sent_time) < SENT_TIME_CACHE_TTL
+        });
+
+        let now = Instant::now();
         for cid in &wantlist.cids {
             if let hash_map::Entry::Vacant(state_entry) = self.req_state.entry(cid.to_owned()) {
                 entries.push(new_want_have_entry(cid, wantlist.set_send_dont_have));
                 state_entry.insert(WantReqState::SentWantHave);
+                // Record in cache when first sending WantHave
+                self.sent_time_cache.entry(cid.to_owned()).or_insert(now);
             }
         }
 
         self.synced_revision = wantlist.revision;
-        self.force_update = false;
+        
+        // Only clear force_update if there are no pending GotHave states
+        // (i.e., all GotHave CIDs have been processed and sent WantBlock)
+        let has_pending_got_have = self.req_state.values().any(|s| *s == WantReqState::GotHave);
+        if !has_pending_got_have {
+            self.force_update = false;
+        }
 
         ProtoWantlist {
             entries,

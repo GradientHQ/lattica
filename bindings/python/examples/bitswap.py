@@ -14,6 +14,15 @@ def main():
             .with_bootstraps(bootstrap_nodes) \
             .build()
 
+        lattica.configure_bitswap_peer_selection(
+            top_n=3,
+            enabled=True,
+            min_peers=2,
+            enable_randomness=True,
+            have_wait_window_ms=100,
+            min_candidate_ratio=0.3
+        )
+
         # wait for connection
         time.sleep(1)
 
@@ -25,6 +34,8 @@ def main():
 
             data = lattica.get_block(request_cid)
             print(f"data: {data}")
+
+            lattica.print_bitswap_stats()
 
         else:
             # put block

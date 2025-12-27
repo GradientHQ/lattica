@@ -99,6 +99,9 @@ version = "0.1"
 [dependencies.quick-protobuf]
 version = "0.8"
 
+[dependencies.rand]
+version = "0.8"
+
 [dependencies.smallvec]
 version = "1"
 

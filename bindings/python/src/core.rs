@@ -1,7 +1,7 @@
 use lattica::{network, rpc, common};
 use std::sync::{Arc};
 use tokio::sync::{Mutex};
-use pyo3::{prelude::*, types::PyDict, IntoPyObjectExt};
+use pyo3::{prelude::*, types::{PyDict, PyList}, IntoPyObjectExt};
 use tokio::runtime::Runtime;
 use libp2p::{Multiaddr, PeerId};
 use async_trait::async_trait;
@@ -556,6 +556,87 @@ impl LatticaSDK {
 
     fn is_symmetric_nat(&self) -> PyResult<Option<bool>> {
         self.lattica.is_symmetric_nat().map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{:?}", e)))
+    }
+
+    /// Configure Bitswap peer selection strategy
+    /// 
+    /// Args:
+    ///     top_n: Number of top peers to select (default: 3)
+    ///     enabled: Enable smart selection (default: true)
+    ///     min_peers: Minimum peers threshold (default: 2)
+    ///     enable_randomness: Enable randomness in selection (default: true)
+    ///     have_wait_window_ms: Wait window in ms after first Have response (default: 100)
+    ///     min_candidate_ratio: Minimum candidate ratio before selection (default: 0.3)
+    #[pyo3(signature = (top_n = 3, enabled = true, min_peers = 2, enable_randomness = true, have_wait_window_ms = 100, min_candidate_ratio = 0.3))]
+    fn configure_bitswap_peer_selection(
+        &self, 
+        top_n: usize, 
+        enabled: bool, 
+        min_peers: usize, 
+        enable_randomness: bool,
+        have_wait_window_ms: u64,
+        min_candidate_ratio: f64,
+    ) -> PyResult<()> {
+        Python::with_gil(|py| {
+            py.allow_threads(|| {
+                self.runtime.block_on(async move {
+                    let config = lattica::PeerSelectionConfig { 
+                        top_n, 
+                        enabled, 
+                        min_peers, 
+                        enable_randomness,
+                        have_wait_window_ms,
+                        min_candidate_ratio,
+                    };
+                    self.lattica.configure_bitswap_peer_selection(config).await
+                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{:?}", e)))
+                })
+            })
+        })
+    }
+
+    /// Get Bitswap global statistics
+    fn get_bitswap_global_stats(&self, py: Python) -> PyResult<PyObject> {
+        py.allow_threads(|| {
+            self.runtime.block_on(async move {
+                let stats = self.lattica.get_bitswap_global_stats().await
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{:?}", e)))?;
+
+                Python::with_gil(|py| {
+                    let dict = PyDict::new(py);
+                    dict.set_item("total_requests", stats.total_requests)?;
+                    dict.set_item("successful_requests", stats.successful_requests)?;
+                    dict.set_item("failed_requests", stats.failed_requests)?;
+                    dict.set_item("total_bytes_received", stats.total_bytes_received)?;
+                    Ok(dict.into_py_any(py)?)
+                })
+            })
+        })
+    }
+
+    /// Get Bitswap peer rankings with detailed metrics
+    fn get_bitswap_peer_rankings(&self, py: Python) -> PyResult<PyObject> {
+        py.allow_threads(|| {
+            self.runtime.block_on(async move {
+                let details = self.lattica.get_bitswap_peer_rankings().await
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{:?}", e)))?;
+                
+                Python::with_gil(|py| {
+                    let list = PyList::empty(py);
+                    for detail in details {
+                        let dict = PyDict::new(py);
+                        dict.set_item("peer_id", detail.peer_id)?;
+                        dict.set_item("score", detail.score)?;
+                        dict.set_item("blocks_received", detail.blocks_received)?;
+                        dict.set_item("failures", detail.failures)?;
+                        dict.set_item("success_rate", detail.success_rate)?;
+                        dict.set_item("avg_speed", detail.avg_speed)?;
+                        list.append(dict)?;
+                    }
+                    Ok(list.into_py_any(py)?)
+                })
+            })
+        })
     }
 }
 
