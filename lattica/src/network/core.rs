@@ -814,6 +814,47 @@ impl Lattica {
         Err(anyhow!("Failed to reconnect to peer {}", peer_id))
     }
 
+    /// Ensure bootstrap and relay nodes are connected, reconnect if necessary
+    async fn ensure_network_connected(&self) {
+        // Reconnect bootstrap nodes
+        for addr in &self.config.bootstrap_nodes {
+            if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
+                let (tx, rx) = oneshot::channel();
+                if self.cmd.try_send(Command::CheckConnection(peer_id, tx)).is_err() {
+                    continue;
+                }
+                let is_connected = rx.await.unwrap_or(false);
+
+                if !is_connected {
+                    tracing::info!("Bootstrap {} not connected, reconnecting...", peer_id);
+                    let (tx, rx) = oneshot::channel();
+                    if self.cmd.try_send(Command::Dial(addr.clone(), tx)).is_ok() {
+                        let _ = tokio::time::timeout(Duration::from_secs(5), rx).await;
+                    }
+                }
+            }
+        }
+
+        // Reconnect relay servers (dial to establish connection)
+        for addr in &self.config.relay_servers {
+            if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
+                let (tx, rx) = oneshot::channel();
+                if self.cmd.try_send(Command::CheckConnection(peer_id, tx)).is_err() {
+                    continue;
+                }
+                let is_connected = rx.await.unwrap_or(false);
+
+                if !is_connected {
+                    tracing::info!("Relay {} not connected, reconnecting...", peer_id);
+                    let (tx, rx) = oneshot::channel();
+                    if self.cmd.try_send(Command::Dial(addr.clone(), tx)).is_ok() {
+                        let _ = tokio::time::timeout(Duration::from_secs(5), rx).await;
+                    }
+                }
+            }
+        }
+    }
+
     async fn ensure_direct_connection(&self, peer_id: &PeerId, timeout: Duration) -> Result<()> {
         // check swarm
         let (tx, rx) = oneshot::channel();
@@ -1091,6 +1132,9 @@ impl Lattica {
         address_book.info(peer_id)?.rtt()
     }
 
+    /// Get a block from the network
+    /// 
+    /// On timeout, this method will trigger bootstrap reconnection for subsequent retries.
     pub async fn get_block(
         &self,
         cid: &Cid,
@@ -1112,10 +1156,14 @@ impl Lattica {
                 Err(anyhow!("Receiver channel closed"))
             }
             Err(_) => {
-                // Timeout occurred, cancel the query
+                // Timeout - cancel query and trigger reconnection for next attempt
                 if let Some(qid) = query_id {
                     let _ = self.cmd.try_send(Command::CancelGet(qid));
                 }
+
+                // Trigger bootstrap reconnection in background for next retry
+                let _ = self.ensure_network_connected().await;
+
                 Err(anyhow!(
                     "get_block timeout: block not found or request timed out after {:?}",
                     timeout
