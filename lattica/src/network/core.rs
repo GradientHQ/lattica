@@ -814,45 +814,17 @@ impl Lattica {
         Err(anyhow!("Failed to reconnect to peer {}", peer_id))
     }
 
-    /// Ensure bootstrap, relay nodes and known peers are connected (concurrent)
+    /// Ensure known data peers are connected (concurrent)
+    /// Note: Bootstrap and relay connections are managed by the global reconnect_timer in swarm_poll
     async fn ensure_network_connected(&self) {
-        // Collect all addresses to reconnect
-        let mut dial_futures = Vec::new();
-
-        // 1. Check bootstrap nodes
-        for addr in &self.config.bootstrap_nodes {
-            if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
-                let (tx, rx) = oneshot::channel();
-                if self.cmd.try_send(Command::CheckConnection(peer_id, tx)).is_ok() {
-                    if !rx.await.unwrap_or(false) {
-                        tracing::info!("Bootstrap {} not connected, will reconnect...", peer_id);
-                        dial_futures.push(self.dial_with_timeout(addr.clone(), "Bootstrap"));
-                    }
-                }
-            }
-        }
-
-        // 2. Check relay servers
-        for addr in &self.config.relay_servers {
-            if let Some(Protocol::P2p(peer_id)) = addr.iter().last() {
-                let (tx, rx) = oneshot::channel();
-                if self.cmd.try_send(Command::CheckConnection(peer_id, tx)).is_ok() {
-                    if !rx.await.unwrap_or(false) {
-                        tracing::info!("Relay {} not connected, will reconnect...", peer_id);
-                        dial_futures.push(self.dial_with_timeout(addr.clone(), "Relay"));
-                    }
-                }
-            }
-        }
-
-        // 3. Check known peers from address book
+        // Check known peers from address book
         let address_book = self.address_book.read().await;
         let known_peers = address_book.peers();
         drop(address_book);
 
         let mut peer_reconnect_futures = Vec::new();
         for peer_id in known_peers.iter() {
-            // Skip bootstrap and relay nodes
+            // Skip bootstrap and relay nodes (handled by global timer)
             let is_infra = self.config.bootstrap_nodes.iter().any(|addr| {
                 addr.iter().last() == Some(Protocol::P2p(*peer_id))
             }) || self.config.relay_servers.iter().any(|addr| {
@@ -871,46 +843,16 @@ impl Lattica {
         }
 
         // Execute all reconnections concurrently
-        if !dial_futures.is_empty() || !peer_reconnect_futures.is_empty() {
-            let dial_count = dial_futures.len();
+        if !peer_reconnect_futures.is_empty() {
             let peer_count = peer_reconnect_futures.len();
-            tracing::info!(
-                "Reconnecting {} infrastructure nodes and {} data peers concurrently...",
-                dial_count,
-                peer_count
-            );
+            tracing::info!("Reconnecting {} data peers concurrently...", peer_count);
 
             // Run all concurrently with overall timeout
             let _ = tokio::time::timeout(Duration::from_secs(10), async {
-                let (dial_results, peer_results) = tokio::join!(
-                    join_all(dial_futures),
-                    join_all(peer_reconnect_futures)
-                );
-                
-                let dial_success = dial_results.iter().filter(|r| r.is_ok()).count();
+                let peer_results = join_all(peer_reconnect_futures).await;
                 let peer_success = peer_results.iter().filter(|r| r.is_ok()).count();
-                
-                tracing::info!(
-                    "Reconnection complete: {}/{} infrastructure, {}/{} peers",
-                    dial_success, dial_count,
-                    peer_success, peer_count
-                );
+                tracing::info!("Reconnection complete: {}/{} peers", peer_success, peer_count);
             }).await;
-        }
-    }
-
-    /// Dial an address with timeout
-    async fn dial_with_timeout(&self, addr: Multiaddr, label: &str) -> Result<()> {
-        let (tx, rx) = oneshot::channel();
-        if self.cmd.try_send(Command::Dial(addr.clone(), tx)).is_err() {
-            return Err(anyhow!("Failed to send dial command"));
-        }
-        match tokio::time::timeout(Duration::from_secs(5), rx).await {
-            Ok(Ok(_)) => {
-                tracing::debug!("{} dial success: {}", label, addr);
-                Ok(())
-            }
-            _ => Err(anyhow!("{} dial failed: {}", label, addr)),
         }
     }
 
