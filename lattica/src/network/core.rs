@@ -1149,7 +1149,7 @@ impl Lattica {
 
     /// Get a block from the network
     /// 
-    /// On timeout, this method will trigger bootstrap reconnection for subsequent retries.
+    /// On timeout, this method will trigger reconnection for subsequent retries.
     pub async fn get_block(
         &self,
         cid: &Cid,
