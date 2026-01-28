@@ -1397,7 +1397,7 @@ async fn swarm_poll(
                                 }
                                 LatticaBehaviourEvent::Gossipsub(gossipsub_event) => {
                                     tracing::debug!("gossipsub event {:?}", gossipsub_event);
-                                    handle_gossipsub_event(gossipsub_event, &mut swarm, &pending_relay_addrs).await;
+                                    handle_gossipsub_event(&config, gossipsub_event, &mut swarm, &pending_relay_addrs).await;
                                 }
                                 LatticaBehaviourEvent::Bitswap(bitswap_event) => {
                                     tracing::info!("bitswap event {:?}", bitswap_event);
