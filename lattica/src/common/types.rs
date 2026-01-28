@@ -29,6 +29,13 @@ pub struct ValueWithTime {
     pub expiration_time: f64,
 }
 
+/// Message structure for relay address gossipsub broadcasts
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct RelayAddrMessage {
+    pub addr: String,
+    pub protocol_version: String,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct QueryId(InnerQueryId);
 
