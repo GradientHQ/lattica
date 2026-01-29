@@ -10,6 +10,7 @@ use fnv::{FnvHashMap};
 use libp2p_stream as stream;
 use crate::common::{BytesBlock, QueryId, P2P_CIRCUIT_TOPIC};
 use cid::Cid;
+use libp2p::kad::store::MemoryStore;
 
 pub enum QueryChannel {
     GetRecord(
@@ -28,7 +29,7 @@ pub enum QueryChannel {
 
 #[derive(NetworkBehaviour)]
 pub struct LatticaBehaviour{
-    pub kad: Toggle<kad::Behaviour<MultiStore>>,
+    pub kad: Toggle<kad::Behaviour<MemoryStore>>,
     pub identify: identify::Behaviour,
     pub ping: ping::Behaviour,
     pub request_response: request_response::Behaviour<rpc::RpcCodec>,
@@ -54,8 +55,7 @@ impl LatticaBehaviour{
         ));
 
         let kad = if config.with_kad {
-            let mut store = MultiStore::new(peer_id, config.dht_db_path.clone()).unwrap();
-            store.warm_up().unwrap();
+            let store = MemoryStore::new(peer_id);
 
             let stream_proto = StreamProtocol::new(proto_version);
             let mut kad_cfg = kad::Config::new(stream_proto);
@@ -114,7 +114,12 @@ impl LatticaBehaviour{
             relay = Toggle::from(relay_behavior)
         }
 
-        let gossipsub_config = gossipsub::Config::default();
+        // Configure gossipsub for small networks - critical for message propagation
+        let gossipsub_config = gossipsub::ConfigBuilder::default()
+            .flood_publish(true)  // Publish to ALL peers, not just mesh
+            .build()
+            .expect("Valid gossipsub config");
+        
         let mut gossipsub = gossipsub::Behaviour::new(MessageAuthenticity::Signed(config.keypair.clone()), gossipsub_config).unwrap();
         let topic = gossipsub::IdentTopic::new(P2P_CIRCUIT_TOPIC);
         gossipsub.subscribe(&topic).unwrap();
